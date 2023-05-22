@@ -102,14 +102,6 @@ class OrthoView:
         )
         self._bgvis.transform = scene.transforms.MatrixTransform(transforms.rotate(90, (1, 0, 0)))
 
-    def set_tractogram(self, name, streamlines, color="red", vertex_data=None, cmap="viridis", radius=0.5):
-        streamlines = streamlines[::20]
-        if vertex_data is not None:
-            vertex_data = vertex_data[::20]
-            cmap = colormap.get_colormap(cmap)
-            vertex_data_norm = [(d - np.min(d)) / (np.max(d) - np.min(d)) for d in vertex_data]
-            vertex_colors = [cmap.map(d) for d in vertex_data_norm]
-
         w2v = np.linalg.inv(self._affine)
         i = np.identity(4)
         v2s = np.identity(4)
@@ -118,39 +110,53 @@ class OrthoView:
         v2s[2, 3] = -self.zpos
         for d in self._flip:
             v2s[:, d] = -v2s[:, d]
-        w2s = np.dot(v2s, w2v)
+        self._w2s = np.dot(v2s, w2v)
         print("v2w\n", self._affine)
         print("v2s\n", v2s)
         print("w2v\n", w2v)
-        print("w2s\n", w2s)
+        print("w2s\n", self._w2s)
         print(self._transpose)
         print(self._flip)
         print(self.zpos)
 
-        if name not in self._tractograms:
+    def set_tractogram(self, name, streamlines, vertex_data, options, updated=()):
+        
+        if name not in self._tractograms or any([v in updated for v in ("style", "width", "subset")]):
+            self.remove_tractogram(name)
+            streamlines = streamlines[::options.get("subset", 20)]
             visuals = []
             for idx, sldata in enumerate(streamlines):
                 print(f"Vis: {idx+1}/{len(streamlines)}")
-                #vis = scene.visuals.Tube(sldata, radius=radius, parent=self._scene, shading='smooth')
-                vis = scene.visuals.Line(sldata, parent=self._scene)
-                #vis.shading_filter.light_dir = (1, 1, 0)
-                #vis.shading_filter.ambient_light = (1, 1, 1, 0.5)
+                if options.get("style", "line") == "tube":
+                    vis = scene.visuals.Tube(sldata, radius=options.get("width", 1), parent=self._scene, shading='smooth')
+                    vis.shading_filter.light_dir = (1, 1, 0)
+                    vis.shading_filter.ambient_light = (1, 1, 1, 0.5)
+                else:
+                    vis = scene.visuals.Line(sldata, parent=self._scene) #  FIXME width
+                vis.transform = scene.transforms.MatrixTransform(np.dot(self._w2s.T, transforms.rotate(90, (1, 0, 0))))
                 visuals.append(vis)
             self._tractograms[name] = visuals
 
         for idx, vis in enumerate(self._tractograms[name]):
-            print(f"Props: {idx+1}/{len(streamlines)}")
-            vis.transform = scene.transforms.MatrixTransform(np.dot(w2s.T, transforms.rotate(90, (1, 0, 0))))
-            #md = vis.mesh_data
-            #if vertex_data is not None:
-            #    vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), vertex_colors=np.repeat(vertex_colors[idx], 8, axis=0))
-            #else:
-            #    vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), color=color)
-            pos = vis.pos
+            print(f"Props: {idx+1}/{len(self._tractograms[name])}")
             if vertex_data is not None:
-                vis.set_data(pos=pos, color=vertex_colors[idx])
+                vertex_data = vertex_data[::options.get("subset", 20)]
+                cmap = colormap.get_colormap(options.get("cmap", "viridis"))
+                vertex_data_norm = [(d - np.min(d)) / (np.max(d) - np.min(d)) for d in vertex_data]
+                vertex_colors = [cmap.map(d) for d in vertex_data_norm]
+
+            if options.get("style", "line") == "tube":
+                md = vis.mesh_data
+                if vertex_data is not None:
+                    vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), vertex_colors=np.repeat(vertex_colors[idx], 8, axis=0))
+                else:
+                    vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), color=options.get("color", "red"))
             else:
-                vis.set_data(pos=pos, color=color)
+                pos = vis.pos
+                if vertex_data is not None:
+                    vis.set_data(pos=pos, color=vertex_colors[idx])
+                else:
+                    vis.set_data(pos=pos, color=options.get("color", "red"))
 
     def remove_tractogram(self, name):
         if name in self._tractograms:
@@ -203,97 +209,120 @@ class TractView(QWidget):
     sig_changed = QtCore.Signal(object)
 
     COLORS = ["red", "green", "blue"]
+    STYLES = ["line", "tube"]
 
-    def __init__(self, name, tractogram):
+    def __init__(self):
         QWidget.__init__(self)
         
-        self.name = name
-        self.streamlines = tractogram.streamlines
-        self._vertex_data = tractogram.data_per_point
-        self._color = "red"
-        self._color_by = None
-        self._cmap = "viridis"
-        self._visuals = []
+        self.name = None
+        self.tractogram = None
+        self._options = {}
 
         hbox = QHBoxLayout()
         self._select_cb = QtWidgets.QCheckBox()
-        self._select_cb.stateChanged.connect(self._select_changed)
+        self._select_cb.stateChanged.connect(self._changed)
         hbox.addWidget(self._select_cb)
         self._name_edit = QtWidgets.QLineEdit()
-        self._name_edit.setText(name)
         hbox.addWidget(self._name_edit)
+
+        hbox.addWidget(QtWidgets.QLabel("Style"))
+        self._style_combo = QtWidgets.QComboBox()
+        for style in self.STYLES:
+            self._style_combo.addItem(style)
+        self._style_combo.currentIndexChanged.connect(self._changed)
+        hbox.addWidget(self._style_combo)
+
+        hbox.addWidget(QtWidgets.QLabel("Width"))
+        self._width_spin = QtWidgets.QSpinBox()
+        self._width_spin.setMinimum(1)
+        self._width_spin.setMaximum(25)
+        self._width_spin.setValue(1)
+        self._width_spin.valueChanged.connect(self._changed)
+        hbox.addWidget(self._width_spin)
+
+        hbox.addWidget(QtWidgets.QLabel("Subset"))
+        self._subset_spin = QtWidgets.QSpinBox()
+        self._subset_spin.setMinimum(1)
+        self._subset_spin.setMaximum(100)
+        self._subset_spin.setValue(20)
+        self._subset_spin.valueChanged.connect(self._changed)
+        hbox.addWidget(self._subset_spin)
 
         hbox.addWidget(QtWidgets.QLabel("Colour"))
         self._color_combo = QtWidgets.QComboBox()
         for col in self.COLORS:
             self._color_combo.addItem(col)
-        self._color_combo.currentIndexChanged.connect(self._color_changed)
+        self._color_combo.currentIndexChanged.connect(self._changed)
         hbox.addWidget(self._color_combo)
 
         hbox.addWidget(QtWidgets.QLabel("Vertex data"))
-        self._data_combo = QtWidgets.QComboBox()
-        self._data_combo.addItem("None")
-        for data_name in self._vertex_data.keys():
-            self._data_combo.addItem(data_name)
-        self._data_combo.currentIndexChanged.connect(self._data_changed)
-        hbox.addWidget(self._data_combo)
+        self._color_by_combo = QtWidgets.QComboBox()
+        self._color_by_combo.addItem("None")
+        self._color_by_combo.currentIndexChanged.connect(self._changed)
+        hbox.addWidget(self._color_by_combo)
 
         hbox.addWidget(QtWidgets.QLabel("Colour map"))
         self._cmap_combo = QtWidgets.QComboBox()
         for cmap_name in colormap.get_colormaps():
             self._cmap_combo.addItem(cmap_name)
-        self._cmap_combo.currentIndexChanged.connect(self._cmap_changed)
+        self._cmap_combo.currentIndexChanged.connect(self._changed)
         hbox.addWidget(self._cmap_combo)
         
         self.setLayout(hbox)
-        self._select_changed()
+        self._changed()
 
-    def _color_changed(self, idx):
-        self._color = self._color_combo.itemText(idx)
-        self.sig_changed.emit(self)
-
-    def _data_changed(self, idx):
-        if idx == 0:
-            self._color_by = None
+    def _changed(self):
+        enabled = self._select_cb.isChecked()
+        color_by_idx = self._color_by_combo.currentIndex()
+        color_by = None if color_by_idx == 0 else self._color_by_combo.itemText(color_by_idx)
+        self._options = {
+            "enabled" : enabled,
+            "style" : self._style_combo.itemText(self._style_combo.currentIndex()),
+            "width" : self._width_spin.value(),
+            "subset" : self._subset_spin.value(),
+        }
+        if color_by is not None:
+            self._options["color_by"] = color_by
+            self._options["cmap"] = self._cmap_combo.itemText(self._cmap_combo.currentIndex())
+            #if self.tratogram is not None:
+            #    self._options["vertex_data"] = self.tractogram.data_per_point[color_by]
         else:
-            self._color_by = self._data_combo.itemText(idx)
-        self._select_changed()
+            self._options["color"] = self._color_combo.itemText(self._color_combo.currentIndex())
 
-    def _cmap_changed(self, idx):
-        self._cmap = self._cmap_combo.itemText(idx)
-        self.sig_changed.emit(self)
-
-    def _select_changed(self):
-        enabled = self.enabled
-        color_by = self.color_by
         self._color_combo.setEnabled(enabled and color_by is None)
         self._cmap_combo.setEnabled(enabled and color_by is not None)
-        self._data_combo.setEnabled(enabled)
+        self._color_by_combo.setEnabled(enabled)
         self.sig_changed.emit(self)
 
+    def set_tract(self, name, tractogram, options):
+        self.name = name
+        self.tractogram = tractogram
+        self._name_edit.setText(name)
+        self._select_cb.setChecked(options.get("enabled", False))
+        self._style_combo.setCurrentIndex(self._style_combo.findText(options.get("style", "line")))
+        self._width_spin.setValue(options.get("width", 1))
+        self._subset_spin.setValue(options.get("subset", 20))
+        self._color_combo.setCurrentIndex(self._color_combo.findText(options.get("color", "red")))
+        self._color_by_combo.clear()
+        self._color_by_combo.addItem("None")
+        for data_name in tractogram.data_per_point.keys():
+            self._color_by_combo.addItem(data_name)
+        self._color_by_combo.setCurrentIndex(self._color_by_combo.findText(options.get("color_by", "None")))
+        self._cmap_combo.setCurrentIndex(self._cmap_combo.findText(options.get("cmap", "viridis")))
+        self._changed()
+
     @property
-    def vertex_data_items(self):
-        return list(self._vertex_data.keys())
+    def streamlines(self):
+        return self.tractogram.streamlines
 
     @property
     def vertex_data(self):
-        return None if self.color_by is None else self._vertex_data[self.color_by]
+        color_by = self._options.get("color_by", None)
+        return None if color_by is None else self.tractogram.data_per_point[color_by]
 
     @property
-    def color(self):
-        return self._color if self.color_by is None else None
-
-    @property
-    def color_by(self):
-        return self._color_by
-
-    @property
-    def cmap(self):
-        return self._cmap if self.color_by is not None else None
-
-    @property
-    def enabled(self):
-        return self._select_cb.isChecked()
+    def options(self):
+        return self._options
 
 class TractSelection(QWidget):
 
@@ -301,7 +330,7 @@ class TractSelection(QWidget):
         QWidget.__init__(self)
         self._viewer = viewer
         self._tract_dir = ""
-        self._selected_tracts = []
+        self._tracts = {}
 
         self._vbox = QVBoxLayout()
         self._vbox.setSpacing(1)
@@ -313,27 +342,28 @@ class TractSelection(QWidget):
         self._button = QtWidgets.QPushButton("Choose directory")
         self._button.clicked.connect(self._choose_file)
         hbox.addWidget(self._button)
+        hbox.addWidget(QtWidgets.QLabel("Tracts: "))
+        self._tract_combo = QtWidgets.QComboBox()
+        self._tract_combo.currentIndexChanged.connect(self._tract_changed)
+        hbox.addWidget(self._tract_combo)
         self._vbox.addLayout(hbox)
+
+        self._tract_view = TractView()
+        self._tract_view.sig_changed.connect(self._tract_view_changed)
+        self._vbox.addWidget(self._tract_view)
 
         self.setLayout(self._vbox)
 
-
     def _set_xtract_dir(self, xtract_dir):
         self._edit.setText(xtract_dir)
-        while 1:
-            child = self._vbox.takeAt(1)
-            if not child:
-                break
-            child.widget().deleteLater()
-
         self._tract_dir = os.path.join(xtract_dir, "tracts")
+        self._tract_combo.clear()
         for dname in os.listdir(self._tract_dir):
             if os.path.isdir(os.path.join(self._tract_dir, dname)) and os.path.exists(os.path.join(self._tract_dir, dname, "streamlines.trk")):
                 trk = nib.streamlines.load(os.path.join(self._tract_dir, dname, "streamlines.trk"))
-                print(f"Creating tract view {dname}")
-                tract_view = TractView(dname, trk.tractogram)
-                tract_view.sig_changed.connect(self._tract_view_changed)
-                self._vbox.addWidget(tract_view)
+                print(f"Found tract {dname}")
+                self._tract_combo.addItem(dname, (trk.tractogram, {}))
+
         self._vbox.addStretch()
 
     def _choose_file(self):
@@ -344,13 +374,28 @@ class TractSelection(QWidget):
             
             self._set_xtract_dir(xtract_dir)
 
-    def _tract_view_changed(self, tv):
-        print("tracts changed: {tv.name}")
+    def _tract_changed(self, idx):
+        name = self._tract_combo.itemText(idx)
+        print(f"tract selected: {name}")
+        tractogram, options = self._tract_combo.itemData(idx)
+        self._tract_view.set_tract(name, tractogram, options)
+
+    def _tract_view_changed(self):
+        print(f"tract view changed")
+        new_options = self._tract_view.options
+        cur_tract_idx = self._tract_combo.currentIndex()
+        name = self._tract_combo.itemText(cur_tract_idx)
+        cur_tractogram, cur_options = self._tract_combo.itemData(cur_tract_idx)
+        updated = [k for k, v in new_options.items() if cur_options.get(k, None) != v]
+        print(new_options, cur_options)
+        print(updated)
+        self._tract_combo.setItemData(cur_tract_idx, (cur_tractogram, new_options))
+
         for view in self._viewer.views:
-            if not tv.enabled:
-                view.remove_tractogram(tv.name)
+            if not new_options["enabled"]:
+                view.remove_tractogram(name)
             else:
-                view.set_tractogram(tv.name, tv.streamlines, color=tv.color, vertex_data=tv.vertex_data, cmap=tv.cmap)
+                view.set_tractogram(name, self._tract_view.streamlines, self._tract_view.vertex_data, new_options, updated)
 
     def _tracts_changed(self):
         selected_now = self._tracts_combo.selected
@@ -363,13 +408,6 @@ class TractSelection(QWidget):
             if tract not in self._selected_tracts:
                 self._select_tract(tract)
         self._selected_tracts = selected_now
-
-    def _select_tract(self, name):
-        trk = nib.streamlines.load(os.path.join(self._tract_dir, name, "streamlines.trk"))
-        self._vertex_data = trk.tractogram.data_per_point.keys()
-        for view in self._viewer.views:
-            view.add_tractogram(trk.tractogram, name)
-
 class DataSelection(QtWidgets.QWidget):
     def __init__(self, viewer):
         QtWidgets.QWidget.__init__(self)
