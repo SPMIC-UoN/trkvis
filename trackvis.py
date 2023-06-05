@@ -32,16 +32,17 @@ class TrkView:
             vertex_colors=np.repeat(all_vertex_colors[sl], 8, axis=0)
             trk_obj = scene.visuals.Tube(sldata, radius=self._radius, vertex_colors=vertex_colors, parent=view.scene)
 
-class OrthoView:
+class OrthoView(scene.SceneCanvas):
 
     def __init__(self, axes):
+        scene.SceneCanvas.__init__(self, keys='interactive', size=(600, 600))
+        self.unfreeze()
 
         if sorted(list(np.abs(axes))) != [0, 1, 2]:
             raise ValueError(f"Invalid axes: {axes}")
         
         self._axes = axes
-        self._canvas = scene.SceneCanvas(keys='interactive', size=(600, 600))
-        self._view = self._canvas.central_widget.add_view()
+        self._view = self.central_widget.add_view()
         self._scene = self._view.scene
         self._shape = [1, 1, 1]
         self._pos = [0, 0, 0]
@@ -49,7 +50,7 @@ class OrthoView:
         self._slices = tuple([slice(None)] * 3)
         self._bgvis = None
         self._tractograms = {}
-        self.widget = self._canvas.native
+        self.widget = self.native
 
         self._transpose = []
         self._flip = []
@@ -65,15 +66,40 @@ class OrthoView:
     def zpos(self):
         return self._pos[self._axes[2]]
 
+    @zpos.setter
+    def zpos(self, zpos):
+        self._pos[self._axes[2]] = int(zpos)
+
+    #def on_mouse_press(self, event):
+    #    print("mouse_press", event.button, event.pos)
+    #    pass
+
+    #def on_mouse_move(self, event):
+    #    print("mouse_move", event.button, event.pos)
+    #    tr = self.scene.node_transform(self._bgvis)
+    #    pos = tr.map(event.pos)
+    #    print("bg_pos", pos)
+
+    #def on_mouse_wheel(self, event):
+    #    print("wheel", event.button, event.pos, event.delta)
+    #    self.zpos = self.zpos + event.delta[1]
+    #    print(self._pos)
+    #    self._update_bgvol()
+
     def set_bgvol(self, data, affine, clim=None, texture_format="auto"):
+        self._bgvol = data
         self._shape = data.shape
         self._pos = [s//2 for s in self._shape[:3]]
         self._affine = affine
+        self._texture_format = texture_format
+        self._clim = clim
         
         data_range = [(0, self._shape[d]) for d in range(3)]
         self._view.camera.set_range(*data_range)
         self._view.camera.center = self._pos
+        self._update_bgvol()
 
+    def _update_bgvol(self):
         slices = [slice(None)] * 3
         for idx, axis in enumerate(self._axes):
             if idx < 2:
@@ -83,10 +109,7 @@ class OrthoView:
                 slices[idx] = self._pos[idx]
         self._slices = tuple(slices)
 
-        if clim is None:
-            clim = (np.min(data), np.max(data))
-
-        data_local = np.transpose(data, self._transpose)
+        data_local = np.transpose(self._bgvol, self._transpose)
         for dim in self._flip:
             data_local = np.flip(data_local, dim)
 
@@ -95,9 +118,9 @@ class OrthoView:
 
         self._bgvis = scene.visuals.Image(
             data_local[:, :, self.zpos].T,
-            cmap='grays', clim=clim,
+            cmap='grays', clim=self._clim,
             fg_color=(0.5, 0.5, 0.5, 1), 
-            texture_format=texture_format, 
+            texture_format=self._texture_format, 
             parent=self._scene
         )
         self._bgvis.transform = scene.transforms.MatrixTransform(transforms.rotate(90, (1, 0, 0)))
@@ -120,7 +143,7 @@ class OrthoView:
         print(self.zpos)
 
     def set_tractogram(self, name, streamlines, vertex_data, options, updated=()):
-        
+
         if name not in self._tractograms or any([v in updated for v in ("style", "width", "subset")]):
             self.remove_tractogram(name)
             streamlines = streamlines[::options.get("subset", 20)]
@@ -169,7 +192,7 @@ class OrthoView:
             self.remove_tractogram(t)
 
     def to_png(self, fname):
-        img = self._canvas.render()
+        img = self.render()
         io.write_png(fname, img)
 
 class VolumeSelection(QWidget):
@@ -284,8 +307,6 @@ class TractView(QWidget):
         if color_by is not None:
             self._options["color_by"] = color_by
             self._options["cmap"] = self._cmap_combo.itemText(self._cmap_combo.currentIndex())
-            #if self.tratogram is not None:
-            #    self._options["vertex_data"] = self.tractogram.data_per_point[color_by]
         else:
             self._options["color"] = self._color_combo.itemText(self._color_combo.currentIndex())
 
@@ -330,7 +351,6 @@ class TractSelection(QWidget):
         QWidget.__init__(self)
         self._viewer = viewer
         self._tract_dir = ""
-        self._tracts = {}
 
         self._vbox = QVBoxLayout()
         self._vbox.setSpacing(1)
@@ -391,23 +411,13 @@ class TractSelection(QWidget):
         print(updated)
         self._tract_combo.setItemData(cur_tract_idx, (cur_tractogram, new_options))
 
-        for view in self._viewer.views:
-            if not new_options["enabled"]:
-                view.remove_tractogram(name)
-            else:
-                view.set_tractogram(name, self._tract_view.streamlines, self._tract_view.vertex_data, new_options, updated)
+        if updated:
+            for view in self._viewer.views:
+                if not new_options["enabled"]:
+                    view.remove_tractogram(name)
+                else:
+                    view.set_tractogram(name, self._tract_view.streamlines, self._tract_view.vertex_data, new_options, updated)
 
-    def _tracts_changed(self):
-        selected_now = self._tracts_combo.selected
-        print("tracts changed: ", selected_now)
-        for tract in self._selected_tracts:
-            if tract not in selected_now:
-                for view in self._viewer.views:
-                    view.remove_tractogram(tract)
-        for tract in selected_now:
-            if tract not in self._selected_tracts:
-                self._select_tract(tract)
-        self._selected_tracts = selected_now
 class DataSelection(QtWidgets.QWidget):
     def __init__(self, viewer):
         QtWidgets.QWidget.__init__(self)
