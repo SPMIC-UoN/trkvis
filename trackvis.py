@@ -35,112 +35,158 @@ class TrkView:
 class OrthoView(scene.SceneCanvas):
 
     def __init__(self, axes):
+        """
+        :param axes: Sequence of x, y, z axes for the view using RAS convention (0=R, 1=A, 2=S)"""
         scene.SceneCanvas.__init__(self, keys='interactive', size=(600, 600))
         self.unfreeze()
 
-        if sorted(list(np.abs(axes))) != [0, 1, 2]:
-            raise ValueError(f"Invalid axes: {axes}")
+        #if sorted(list(np.abs(axes[:3]))) != [0, 1, 2]:
+        #    raise ValueError(f"Invalid axes: {axes}")
         
-        self._axes = axes
+        self._display2ras = axes[:3]
+        self._flip_display = axes[3]
         self._view = self.central_widget.add_view()
         self._scene = self._view.scene
         self._shape = [1, 1, 1]
         self._pos = [0, 0, 0]
-        self._affine = np.identity(4)
-        self._slices = tuple([slice(None)] * 3)
         self._bgvis = None
         self._tractograms = {}
         self.widget = self.native
-
-        self._transpose = []
-        self._flip = []
-        for idx, axis in enumerate(axes):
-            self._transpose.append(np.abs(axis))
-            if axis < 0:
-                self._flip.append(np.abs(axis))
+        self._miscvis = []
 
         cam = scene.ArcballCamera(center=self._pos)
         self._view.camera = cam
 
+        self.set_affine(np.identity(4))
+
+    def set_affine(self, affine):
+        """
+        Get the grid axes which best correspond to the RAS axes
+
+        :return: List of four integers giving the axes indices of the R, A and S axes.
+                 The fourth integer is always 3 indicating the volume axis
+        """
+        self._ras2display = [0, 0, 0]
+        for display_axis, ras_axis in enumerate(self._display2ras):
+            self._ras2display[ras_axis] = display_axis
+
+        self._v2w = affine
+        transform = self._v2w[:3, :3]
+        # Sequence defining which RAS axis is identified with each data axis
+        self._data2ras = [np.argmax(np.abs(transform[:, axis])) for axis in range(3)]
+        print("Data->RAS axis sequence: ", self._data2ras)
+        
+        # Sequence defining which data axis is identified with each RAS axis
+        # and which RAS axes are flipped in the data
+        self._ras2data = [self._data2ras.index(axis) for axis in range(3)]
+        self._flip_ras = []
+        for ras_axis, data_axis in enumerate(self._ras2data):
+            if transform[data_axis, ras_axis] < 0:
+                self._flip_ras.append(ras_axis)
+        print("RAS->data axis sequence: ", self._ras2data)
+        print("RAS axes that are flipped in data: ", self._flip_ras)
+
+        zaxis_data = self._ras2data[self.zaxis_ras]
+        slices = [slice(None)] * 3
+        slices[zaxis_data] = self.zpos
+        print("Slicing data on axis: ", zaxis_data)
+
+        # Identify which data axis is identified with each display axis
+        # and which data axes need to be flipped
+        self._display2data = [self._ras2data[ax] for ax in self._display2ras]
+        self._flip_display = []
+        for display_axis, data_axis in enumerate(self._display2data):
+            if self._data2ras[data_axis] in self._flip_ras:
+                self._flip_display.append(display_axis)
+        print("Axis transposition/flip for display: ", self._display2ras, self._display2data, self._flip_display)
+
+    def _process_mouse_event(self, event):
+        if event.type == "mouse_wheel":
+            self.zpos = self.zpos + event.delta[1]
+            self._update_bgvol()
+        else:
+            from vispy.scene.events import SceneMouseEvent
+            scene_event = SceneMouseEvent(event=event, visual=self._view)
+            getattr(self._view.events, event.type)(scene_event)
+
+    @property
+    def zaxis_ras(self):
+        return self._display2ras[2]
+
+    @property
+    def zaxis_data(self):
+        return self._ras2data[self.zaxis_ras]
+
     @property
     def zpos(self):
-        return self._pos[self._axes[2]]
+        return self._pos[self.zaxis_data]
 
     @zpos.setter
     def zpos(self, zpos):
-        self._pos[self._axes[2]] = int(zpos)
-
-    #def on_mouse_press(self, event):
-    #    print("mouse_press", event.button, event.pos)
-    #    pass
-
-    #def on_mouse_move(self, event):
-    #    print("mouse_move", event.button, event.pos)
-    #    tr = self.scene.node_transform(self._bgvis)
-    #    pos = tr.map(event.pos)
-    #    print("bg_pos", pos)
-
-    #def on_mouse_wheel(self, event):
-    #    print("wheel", event.button, event.pos, event.delta)
-    #    self.zpos = self.zpos + event.delta[1]
-    #    print(self._pos)
-    #    self._update_bgvol()
+        self._pos[self.zaxis_data] = int(zpos)
 
     def set_bgvol(self, data, affine, clim=None, texture_format="auto"):
         self._bgvol = data
         self._shape = data.shape
         self._pos = [s//2 for s in self._shape[:3]]
-        self._affine = affine
+        self.set_affine(affine)
         self._texture_format = texture_format
         self._clim = clim
-        
+        self._data_local = np.transpose(self._bgvol, self._display2data)
+        for dim in self._flip_display:
+            self._data_local = np.flip(self._data_local, dim)
+
         data_range = [(0, self._shape[d]) for d in range(3)]
         self._view.camera.set_range(*data_range)
-        self._view.camera.center = self._pos
+        cam_centre = list(self._pos)
+        cam_centre[1] = -cam_centre[1]
+        self._view.camera.center = cam_centre
+        # Left = Right for radiological perspective
+        self._view.camera.flip = [True if self._ras2display[idx] == 0 else False for idx in range(3)]
         self._update_bgvol()
 
-    def _update_bgvol(self):
-        slices = [slice(None)] * 3
-        for idx, axis in enumerate(self._axes):
-            if idx < 2:
-                if axis < 0:
-                    slices[idx] = slice(0, -1, -1)
-            else:
-                slices[idx] = self._pos[idx]
-        self._slices = tuple(slices)
-
-        data_local = np.transpose(self._bgvol, self._transpose)
-        for dim in self._flip:
-            data_local = np.flip(data_local, dim)
-
+    def _update_bgvol(self):      
         if self._bgvis is not None:
             self._bgvis.parent = None
 
+        for vis in self._miscvis:
+            vis.parent = None
+        self._miscvis = []
+
         self._bgvis = scene.visuals.Image(
-            data_local[:, :, self.zpos].T,
+            self._data_local[:, :, self.zpos].T,
             cmap='grays', clim=self._clim,
             fg_color=(0.5, 0.5, 0.5, 1), 
             texture_format=self._texture_format, 
             parent=self._scene
         )
-        self._bgvis.transform = scene.transforms.MatrixTransform(transforms.rotate(90, (1, 0, 0)))
+        tvec = [0, 0, 0]
+        tvec[self.zaxis_data] = self.zpos
+        img2axis = transforms.translate((0, 0, self.zpos))
+        img2axis = np.dot(img2axis, transforms.rotate(90, (1, 0, 0)))
+        self._bgvis.transform = scene.transforms.MatrixTransform(img2axis)
 
-        w2v = np.linalg.inv(self._affine)
+        w2v = np.linalg.inv(self._v2w)
         i = np.identity(4)
-        v2s = np.identity(4)
-        for idx, d in enumerate(self._transpose):
-            v2s[idx, :] = i[d, :]
-        v2s[2, 3] = -self.zpos
-        for d in self._flip:
-            v2s[:, d] = -v2s[:, d]
-        self._w2s = np.dot(v2s, w2v)
-        print("v2w\n", self._affine)
-        print("v2s\n", v2s)
-        print("w2v\n", w2v)
-        print("w2s\n", self._w2s)
-        print(self._transpose)
-        print(self._flip)
-        print(self.zpos)
+        v2d = np.identity(4)
+        for ras_axis, display_axis in enumerate(self._ras2display):
+            v2d[display_axis, :] = i[ras_axis, :]
+        #v2d[2, 3] = self.zpos
+        for d in self._flip_display:
+            v2d[d, :] = -v2d[d, :]
+            v2d[d, 3] = self._shape[d]-1
+        self._w2d= np.dot(v2d, w2v)
+        #print("v2w\n", self._v2w)
+        print("v2d\n", v2d)
+        #print("w2v\n", w2v)
+        #print("w2s\n", self._w2s)
+        #print(self._display_axes)
+        #print(self._display_flip)
+        #print(self._pos)
+        #print(self.zpos)
+        for t in self._tractograms.values():
+            for vis in t:
+                vis.transform = scene.transforms.MatrixTransform(np.dot(self._w2d.T, transforms.rotate(90, (1, 0, 0))))
 
     def set_tractogram(self, name, streamlines, vertex_data, options, updated=()):
 
@@ -151,23 +197,24 @@ class OrthoView(scene.SceneCanvas):
             for idx, sldata in enumerate(streamlines):
                 print(f"Vis: {idx+1}/{len(streamlines)}")
                 if options.get("style", "line") == "tube":
-                    vis = scene.visuals.Tube(sldata, radius=options.get("width", 1), parent=self._scene, shading='smooth')
-                    vis.shading_filter.light_dir = (1, 1, 0)
+                    vis = scene.visuals.Tube(sldata, radius=options.get("width", 1), shading='smooth')
+                    vis.shading_filter.light_dir = [-1 if  idx == 1 and self.zaxis_ras == 0 else 1 for idx in range(3)] # Total hack
                     vis.shading_filter.ambient_light = (1, 1, 1, 0.5)
+                    vis.shading_filter.shininess = 1000
+                    vis.parent = self._scene
                 else:
                     vis = scene.visuals.Line(sldata, parent=self._scene) #  FIXME width
-                vis.transform = scene.transforms.MatrixTransform(np.dot(self._w2s.T, transforms.rotate(90, (1, 0, 0))))
+                vis.transform = scene.transforms.MatrixTransform(np.dot(self._w2d.T, transforms.rotate(90, (1, 0, 0))))
                 visuals.append(vis)
             self._tractograms[name] = visuals
 
-        for idx, vis in enumerate(self._tractograms[name]):
-            print(f"Props: {idx+1}/{len(self._tractograms[name])}")
-            if vertex_data is not None:
-                vertex_data = vertex_data[::options.get("subset", 20)]
-                cmap = colormap.get_colormap(options.get("cmap", "viridis"))
-                vertex_data_norm = [(d - np.min(d)) / (np.max(d) - np.min(d)) for d in vertex_data]
-                vertex_colors = [cmap.map(d) for d in vertex_data_norm]
+        if vertex_data is not None:
+            vertex_data = vertex_data[::options.get("subset", 20)]
+            cmap = colormap.get_colormap(options.get("cmap", "viridis"))
+            vertex_data_norm = [(d - np.min(d)) / (np.max(d) - np.min(d)) for d in vertex_data]
+            vertex_colors = [cmap.map(d) for d in vertex_data_norm]
 
+        for idx, vis in enumerate(self._tractograms[name]):
             if options.get("style", "line") == "tube":
                 md = vis.mesh_data
                 if vertex_data is not None:
@@ -214,7 +261,6 @@ class VolumeSelection(QWidget):
 
     def _choose_file(self):
         fname, _filter = QtWidgets.QFileDialog.getOpenFileName()
-        print(fname)
         if fname:
             try:
                 nii = nib.load(fname)
@@ -231,8 +277,8 @@ class TractView(QWidget):
 
     sig_changed = QtCore.Signal(object)
 
-    COLORS = ["red", "green", "blue"]
-    STYLES = ["line", "tube"]
+    COLORS = ["red", "green", "blue", "yellow"]
+    STYLES = ["none", "line", "tube"]
 
     def __init__(self):
         QWidget.__init__(self)
@@ -242,67 +288,59 @@ class TractView(QWidget):
         self._options = {}
 
         hbox = QHBoxLayout()
-        self._select_cb = QtWidgets.QCheckBox()
-        self._select_cb.stateChanged.connect(self._changed)
-        hbox.addWidget(self._select_cb)
-        self._name_edit = QtWidgets.QLineEdit()
-        hbox.addWidget(self._name_edit)
 
-        hbox.addWidget(QtWidgets.QLabel("Style"))
+        hbox.addWidget(QtWidgets.QLabel("View"))
         self._style_combo = QtWidgets.QComboBox()
         for style in self.STYLES:
             self._style_combo.addItem(style)
         self._style_combo.currentIndexChanged.connect(self._changed)
-        hbox.addWidget(self._style_combo)
+        hbox.addWidget(self._style_combo, stretch=1)
 
         hbox.addWidget(QtWidgets.QLabel("Width"))
-        self._width_spin = QtWidgets.QSpinBox()
-        self._width_spin.setMinimum(1)
-        self._width_spin.setMaximum(25)
-        self._width_spin.setValue(1)
-        self._width_spin.valueChanged.connect(self._changed)
-        hbox.addWidget(self._width_spin)
+        self._width_edit = QtWidgets.QLineEdit()
+        self._width_edit.setText("1")
+        self._width_edit.setValidator(QtGui.QDoubleValidator())
+        self._width_edit.editingFinished.connect(self._changed)
+        hbox.addWidget(self._width_edit, stretch=1)
 
         hbox.addWidget(QtWidgets.QLabel("Subset"))
-        self._subset_spin = QtWidgets.QSpinBox()
-        self._subset_spin.setMinimum(1)
-        self._subset_spin.setMaximum(100)
-        self._subset_spin.setValue(20)
-        self._subset_spin.valueChanged.connect(self._changed)
-        hbox.addWidget(self._subset_spin)
+        self._subset_edit = QtWidgets.QLineEdit()
+        self._subset_edit.setText("50")
+        self._subset_edit.editingFinished.connect(self._changed)
+        hbox.addWidget(self._subset_edit, stretch=1)
 
         hbox.addWidget(QtWidgets.QLabel("Colour"))
         self._color_combo = QtWidgets.QComboBox()
         for col in self.COLORS:
             self._color_combo.addItem(col)
         self._color_combo.currentIndexChanged.connect(self._changed)
-        hbox.addWidget(self._color_combo)
+        hbox.addWidget(self._color_combo, stretch=1)
 
         hbox.addWidget(QtWidgets.QLabel("Vertex data"))
         self._color_by_combo = QtWidgets.QComboBox()
         self._color_by_combo.addItem("None")
         self._color_by_combo.currentIndexChanged.connect(self._changed)
-        hbox.addWidget(self._color_by_combo)
+        hbox.addWidget(self._color_by_combo, stretch=1)
 
         hbox.addWidget(QtWidgets.QLabel("Colour map"))
         self._cmap_combo = QtWidgets.QComboBox()
         for cmap_name in colormap.get_colormaps():
             self._cmap_combo.addItem(cmap_name)
         self._cmap_combo.currentIndexChanged.connect(self._changed)
-        hbox.addWidget(self._cmap_combo)
+        hbox.addWidget(self._cmap_combo, stretch=1)
         
         self.setLayout(hbox)
         self._changed()
 
     def _changed(self):
-        enabled = self._select_cb.isChecked()
+        style = self._style_combo.itemText(self._style_combo.currentIndex())
+        enabled = style != "none"
         color_by_idx = self._color_by_combo.currentIndex()
         color_by = None if color_by_idx == 0 else self._color_by_combo.itemText(color_by_idx)
         self._options = {
-            "enabled" : enabled,
             "style" : self._style_combo.itemText(self._style_combo.currentIndex()),
-            "width" : self._width_spin.value(),
-            "subset" : self._subset_spin.value(),
+            "width" : float(self._width_edit.text()),
+            "subset" : float(self._subset_edit.text()),
         }
         if color_by is not None:
             self._options["color_by"] = color_by
@@ -318,11 +356,9 @@ class TractView(QWidget):
     def set_tract(self, name, tractogram, options):
         self.name = name
         self.tractogram = tractogram
-        self._name_edit.setText(name)
-        self._select_cb.setChecked(options.get("enabled", False))
-        self._style_combo.setCurrentIndex(self._style_combo.findText(options.get("style", "line")))
-        self._width_spin.setValue(options.get("width", 1))
-        self._subset_spin.setValue(options.get("subset", 20))
+        self._style_combo.setCurrentIndex(self._style_combo.findText(options.get("style", "none")))
+        self._width_edit.setText(str(options.get("width", 1)))
+        self._subset_edit.setText(str(options.get("subset", 50)))
         self._color_combo.setCurrentIndex(self._color_combo.findText(options.get("color", "red")))
         self._color_by_combo.clear()
         self._color_by_combo.addItem("None")
@@ -362,15 +398,18 @@ class TractSelection(QWidget):
         self._button = QtWidgets.QPushButton("Choose directory")
         self._button.clicked.connect(self._choose_file)
         hbox.addWidget(self._button)
-        hbox.addWidget(QtWidgets.QLabel("Tracts: "))
+        self._vbox.addLayout(hbox)
+
+        hbox = QHBoxLayout()
+        hbox.addWidget(QtWidgets.QLabel("Tracts: "), stretch=0)
         self._tract_combo = QtWidgets.QComboBox()
         self._tract_combo.currentIndexChanged.connect(self._tract_changed)
-        hbox.addWidget(self._tract_combo)
-        self._vbox.addLayout(hbox)
+        hbox.addWidget(self._tract_combo, stretch=0)
 
         self._tract_view = TractView()
         self._tract_view.sig_changed.connect(self._tract_view_changed)
-        self._vbox.addWidget(self._tract_view)
+        hbox.addWidget(self._tract_view, stretch=2)
+        self._vbox.addLayout(hbox)
 
         self.setLayout(self._vbox)
 
@@ -381,7 +420,6 @@ class TractSelection(QWidget):
         for dname in os.listdir(self._tract_dir):
             if os.path.isdir(os.path.join(self._tract_dir, dname)) and os.path.exists(os.path.join(self._tract_dir, dname, "streamlines.trk")):
                 trk = nib.streamlines.load(os.path.join(self._tract_dir, dname, "streamlines.trk"))
-                print(f"Found tract {dname}")
                 self._tract_combo.addItem(dname, (trk.tractogram, {}))
 
         self._vbox.addStretch()
@@ -396,24 +434,20 @@ class TractSelection(QWidget):
 
     def _tract_changed(self, idx):
         name = self._tract_combo.itemText(idx)
-        print(f"tract selected: {name}")
         tractogram, options = self._tract_combo.itemData(idx)
         self._tract_view.set_tract(name, tractogram, options)
 
     def _tract_view_changed(self):
-        print(f"tract view changed")
         new_options = self._tract_view.options
         cur_tract_idx = self._tract_combo.currentIndex()
         name = self._tract_combo.itemText(cur_tract_idx)
         cur_tractogram, cur_options = self._tract_combo.itemData(cur_tract_idx)
         updated = [k for k, v in new_options.items() if cur_options.get(k, None) != v]
-        print(new_options, cur_options)
-        print(updated)
         self._tract_combo.setItemData(cur_tract_idx, (cur_tractogram, new_options))
 
         if updated:
             for view in self._viewer.views:
-                if not new_options["enabled"]:
+                if new_options["style"] == "none":
                     view.remove_tractogram(name)
                 else:
                     view.set_tractogram(name, self._tract_view.streamlines, self._tract_view.vertex_data, new_options, updated)
@@ -439,9 +473,9 @@ class TrackVis(QWidget):
         
         self.views = []
         for axis_mapping in [
-            (0, 1, 2),
-            (1, 2, 0),
-            (0, 2, 1),
+            (0, 1, 2, [2]),
+            (1, 2, 0, []),
+            (0, 2, 1, []),
         ]:
             view = OrthoView(axis_mapping)
             hbox.addWidget(view.widget)
