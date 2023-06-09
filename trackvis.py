@@ -100,6 +100,10 @@ class OrthoView(scene.SceneCanvas):
                 self._flip_display.append(display_axis)
         print("Axis transposition/flip for display: ", self._display2ras, self._display2data, self._flip_display)
 
+    def showEvent(self, event):
+        print('in showEvent')
+        scene.SceneCanvas.showEvent(event)
+
     def _process_mouse_event(self, event):
         if event.type == "mouse_wheel":
             self.zpos = self.zpos + event.delta[1]
@@ -306,6 +310,7 @@ class TractView(QWidget):
         hbox.addWidget(QtWidgets.QLabel("Subset"))
         self._subset_edit = QtWidgets.QLineEdit()
         self._subset_edit.setText("50")
+        self._width_edit.setValidator(QtGui.QIntValidator())
         self._subset_edit.editingFinished.connect(self._changed)
         hbox.addWidget(self._subset_edit, stretch=1)
 
@@ -340,7 +345,7 @@ class TractView(QWidget):
         self._options = {
             "style" : self._style_combo.itemText(self._style_combo.currentIndex()),
             "width" : float(self._width_edit.text()),
-            "subset" : float(self._subset_edit.text()),
+            "subset" : int(self._subset_edit.text()),
         }
         if color_by is not None:
             self._options["color_by"] = color_by
@@ -354,18 +359,22 @@ class TractView(QWidget):
         self.sig_changed.emit(self)
 
     def set_tract(self, name, tractogram, options):
-        self.name = name
-        self.tractogram = tractogram
-        self._style_combo.setCurrentIndex(self._style_combo.findText(options.get("style", "none")))
-        self._width_edit.setText(str(options.get("width", 1)))
-        self._subset_edit.setText(str(options.get("subset", 50)))
-        self._color_combo.setCurrentIndex(self._color_combo.findText(options.get("color", "red")))
-        self._color_by_combo.clear()
-        self._color_by_combo.addItem("None")
-        for data_name in tractogram.data_per_point.keys():
-            self._color_by_combo.addItem(data_name)
-        self._color_by_combo.setCurrentIndex(self._color_by_combo.findText(options.get("color_by", "None")))
-        self._cmap_combo.setCurrentIndex(self._cmap_combo.findText(options.get("cmap", "viridis")))
+        try:
+            self.blockSignals(True)
+            self.name = name
+            self.tractogram = tractogram
+            self._style_combo.setCurrentIndex(self._style_combo.findText(options.get("style", "none")))
+            self._width_edit.setText(str(options.get("width", 1)))
+            self._subset_edit.setText(str(options.get("subset", 50)))
+            self._color_combo.setCurrentIndex(self._color_combo.findText(options.get("color", "red")))
+            self._color_by_combo.clear()
+            self._color_by_combo.addItem("None")
+            for data_name in tractogram.data_per_point.keys():
+                self._color_by_combo.addItem(data_name)
+            self._color_by_combo.setCurrentIndex(self._color_by_combo.findText(options.get("color_by", "None")))
+            self._cmap_combo.setCurrentIndex(self._cmap_combo.findText(options.get("cmap", "viridis")))
+        finally:
+            self.blockSignals(False)
         self._changed()
 
     @property
@@ -375,6 +384,7 @@ class TractView(QWidget):
     @property
     def vertex_data(self):
         color_by = self._options.get("color_by", None)
+        print("vertex data: ", self.name, color_by)
         return None if color_by is None else self.tractogram.data_per_point[color_by]
 
     @property
@@ -469,6 +479,31 @@ class TrackVis(QWidget):
         vbox.addWidget(DataSelection(self))
 
         hbox = QHBoxLayout()
+        btn = QtWidgets.QPushButton()
+        btn.setIcon(QtGui.QIcon("coronal.png"))
+        btn.setFixedSize(32, 32)
+        btn.setIconSize(QtCore.QSize(30, 30))
+        btn.setToolTip("Show/hide coronal view")
+        btn.clicked.connect(self._cor_btn_clicked)
+        hbox.addWidget(btn)
+        btn = QtWidgets.QPushButton()
+        btn.setIcon(QtGui.QIcon("saggital.png"))
+        btn.setFixedSize(32, 32)
+        btn.setIconSize(QtCore.QSize(30, 30))
+        btn.setToolTip("Show/hide saggital view")
+        btn.clicked.connect(self._sag_btn_clicked)
+        hbox.addWidget(btn)
+        btn = QtWidgets.QPushButton()
+        btn.setIcon(QtGui.QIcon("axial.png"))
+        btn.setFixedSize(32, 32)
+        btn.setIconSize(QtCore.QSize(30, 30))
+        btn.setToolTip("Show/hide axial view")
+        btn.clicked.connect(self._ax_btn_clicked)
+        hbox.addWidget(btn)
+        hbox.addStretch()
+        vbox.addLayout(hbox)
+        
+        hbox = QHBoxLayout()
         vbox.addLayout(hbox)
         
         self.views = []
@@ -478,10 +513,17 @@ class TrackVis(QWidget):
             (0, 2, 1, []),
         ]:
             view = OrthoView(axis_mapping)
-            hbox.addWidget(view.widget)
+            hbox.addWidget(view.widget, stretch=1)
             self.views.append(view)
 
         self.setLayout(vbox)
+
+    def _cor_btn_clicked(self):
+        self.views[1].widget.setVisible(not self.views[1].widget.isVisible())
+    def _sag_btn_clicked(self):
+        self.views[2].widget.setVisible(not self.views[2].widget.isVisible())
+    def _ax_btn_clicked(self):
+        self.views[0].widget.setVisible(not self.views[0].widget.isVisible())
 
 app = QApplication(sys.argv)
 #scene.backends.use("Pyside2")
