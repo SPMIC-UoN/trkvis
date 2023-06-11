@@ -3,6 +3,7 @@
 Simple tractography visualisation
 """
 import os
+import signal
 import sys
 
 import nibabel as nib
@@ -606,17 +607,11 @@ class TrackVis(QWidget):
     def _ax_btn_clicked(self):
         self.views[0].widget.setVisible(not self.views[0].widget.isVisible())
 
-app = QApplication(sys.argv)
-#scene.backends.use("Pyside2")
-win = TrackVis("MNI152_T1_2mm.nii.gz", "xtract_results")
+def main():
+    # Handle CTRL-C 
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-#nii_vol = nib.load("MNI152_T1_2mm.nii.gz")
-#nii = nib.load("densityNorm.nii.gz")
-#vol_data = nii_vol.get_fdata()[:,:,:]
-#vol = scene.visuals.Volume(np.transpose(vol_data, (2, 1, 0)), parent=view.scene, method="mip")
-#vol.transform = scene.transforms.MatrixTransform(nii_vol.header.get_best_affine().T)
-
-win.show()
-for idx, view in enumerate(win.views):
-    view.to_png(f"view_{idx}.png")
-sys.exit(app.exec_())
+    app = QApplication(sys.argv)
+    win = TrackVis("MNI152_T1_2mm.nii.gz", "xtract_results")
+    win.show()
+    sys.exit(app.exec_())
