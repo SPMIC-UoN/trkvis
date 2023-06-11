@@ -267,6 +267,25 @@ class OrthoView(scene.SceneCanvas):
         img = self.render()
         io.write_png(fname, img)
 
+class VolumeView(OrthoView):
+
+    def _update_bgvol(self):
+        self._view.camera.flip = [False,] * 3
+        self._data_local = self._bgvol
+ 
+        if self._bgvis is not None:
+            self._bgvis.parent = None
+
+        self._bgvis = scene.visuals.Volume(
+            self._data_local.T,
+            cmap='grays', clim=self._clim,
+            texture_format=self._texture_format,
+            method="mip",
+            parent=self._scene
+        )
+        img2axis = transforms.rotate(90, (1, 0, 0))
+        self._bgvis.transform = scene.transforms.MatrixTransform(img2axis)
+
 class VolumeSelection(QWidget):
 
     def __init__(self, viewer):
@@ -557,21 +576,7 @@ class TrackVis(QWidget):
         vbox.addWidget(LightControl(self))
 
         hbox = QHBoxLayout()
-        btn = QtWidgets.QPushButton()
-        print(os.path.join(LOCAL_FILE_PATH, "icons", "coronal.png"))
-        btn.setIcon(get_icon("coronal"))
-        btn.setFixedSize(32, 32)
-        btn.setIconSize(QtCore.QSize(30, 30))
-        btn.setToolTip("Show/hide coronal view")
-        btn.clicked.connect(self._cor_btn_clicked)
-        hbox.addWidget(btn)
-        btn = QtWidgets.QPushButton()
-        btn.setIcon(get_icon("saggital"))
-        btn.setFixedSize(32, 32)
-        btn.setIconSize(QtCore.QSize(30, 30))
-        btn.setToolTip("Show/hide saggital view")
-        btn.clicked.connect(self._sag_btn_clicked)
-        hbox.addWidget(btn)
+
         btn = QtWidgets.QPushButton()
         btn.setIcon(get_icon("axial"))
         btn.setFixedSize(32, 32)
@@ -579,11 +584,28 @@ class TrackVis(QWidget):
         btn.setToolTip("Show/hide axial view")
         btn.clicked.connect(self._ax_btn_clicked)
         hbox.addWidget(btn)
+
+        btn = QtWidgets.QPushButton()
+        btn.setIcon(get_icon("saggital"))
+        btn.setFixedSize(32, 32)
+        btn.setIconSize(QtCore.QSize(30, 30))
+        btn.setToolTip("Show/hide saggital view")
+        btn.clicked.connect(self._sag_btn_clicked)
+        hbox.addWidget(btn)
+
+        btn = QtWidgets.QPushButton()
+        btn.setIcon(get_icon("coronal"))
+        btn.setFixedSize(32, 32)
+        btn.setIconSize(QtCore.QSize(30, 30))
+        btn.setToolTip("Show/hide coronal view")
+        btn.clicked.connect(self._cor_btn_clicked)
+        hbox.addWidget(btn)
+
         hbox.addStretch()
         vbox.addLayout(hbox)
         
         hbox = QHBoxLayout()
-        vbox.addLayout(hbox)
+        vbox.addLayout(hbox, stretch=2)
         
         self.views = []
         for axis_mapping in [
@@ -594,6 +616,10 @@ class TrackVis(QWidget):
             view = OrthoView(axis_mapping)
             hbox.addWidget(view.widget, stretch=1)
             self.views.append(view)
+
+        view = VolumeView((0, 1, 2, [2]))
+        hbox.addWidget(view.widget, stretch=1)
+        self.views.append(view)
 
         self.setLayout(vbox)
 
