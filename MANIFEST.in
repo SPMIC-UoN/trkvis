@@ -1,0 +1,2 @@
+recursive-include trkvis *.png *.svg *.stylesheet
+include requirements.txt LICENSE
