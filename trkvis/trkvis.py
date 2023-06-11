@@ -19,6 +19,8 @@ from vispy.util import transforms
 from vispy.color import Color, colormap
 from vispy.visuals.filters import ShadingFilter
 
+LOCAL_FILE_PATH = ""
+
 class TrkView:
 
     def __init__(self, view, tractogram, cmap="viridis", radius=0.5):
@@ -104,6 +106,18 @@ class OrthoView(scene.SceneCanvas):
                 self._flip_display.append(display_axis)
         print("Axis transposition/flip for display: ", self._display2ras, self._display2data, self._flip_display)
 
+        w2v = np.linalg.inv(self._v2w)
+        i = np.identity(4)
+        v2d = np.identity(4)
+        for ras_axis, display_axis in enumerate(self._ras2display):
+            v2d[display_axis, :] = i[ras_axis, :]
+        for d in self._flip_display:
+            v2d[d, :] = -v2d[d, :]
+            v2d[d, 3] = self._shape[d]-1
+        self._w2d= np.dot(v2d, w2v)
+        tract_transform = scene.transforms.MatrixTransform(np.dot(self._w2d.T, transforms.rotate(90, (1, 0, 0))))
+        self.set_prop("transform", tract_transform)
+
     def showEvent(self, event):
         print('in showEvent')
         scene.SceneCanvas.showEvent(event)
@@ -151,9 +165,6 @@ class OrthoView(scene.SceneCanvas):
         self.set_affine(affine)
         self._texture_format = texture_format
         self._clim = clim
-        self._data_local = np.transpose(self._bgvol, self._display2data)
-        for dim in self._flip_display:
-            self._data_local = np.flip(self._data_local, dim)
 
         data_range = [(0, self._shape[d]) for d in range(3)]
         self._view.camera.set_range(*data_range)
@@ -164,7 +175,11 @@ class OrthoView(scene.SceneCanvas):
         self._view.camera.flip = [True if self._ras2display[idx] == 0 else False for idx in range(3)]
         self._update_bgvol()
 
-    def _update_bgvol(self):      
+    def _update_bgvol(self):     
+        self._data_local = np.transpose(self._bgvol, self._display2data)
+        for dim in self._flip_display:
+            self._data_local = np.flip(self._data_local, dim)
+ 
         if self._bgvis is not None:
             self._bgvis.parent = None
 
@@ -184,28 +199,6 @@ class OrthoView(scene.SceneCanvas):
         img2axis = transforms.translate((0, 0, self.zpos))
         img2axis = np.dot(img2axis, transforms.rotate(90, (1, 0, 0)))
         self._bgvis.transform = scene.transforms.MatrixTransform(img2axis)
-
-        w2v = np.linalg.inv(self._v2w)
-        i = np.identity(4)
-        v2d = np.identity(4)
-        for ras_axis, display_axis in enumerate(self._ras2display):
-            v2d[display_axis, :] = i[ras_axis, :]
-        #v2d[2, 3] = self.zpos
-        for d in self._flip_display:
-            v2d[d, :] = -v2d[d, :]
-            v2d[d, 3] = self._shape[d]-1
-        self._w2d= np.dot(v2d, w2v)
-        #print("v2w\n", self._v2w)
-        print("v2d\n", v2d)
-        #print("w2v\n", w2v)
-        #print("w2s\n", self._w2s)
-        #print(self._display_axes)
-        #print(self._display_flip)
-        #print(self._pos)
-        #print(self.zpos)
-        for t in self._tractograms.values():
-            for vis in t:
-                vis.transform = scene.transforms.MatrixTransform(np.dot(self._w2d.T, transforms.rotate(90, (1, 0, 0))))
 
     def set_prop(self, props, value):
         for t in self._tractograms.values():
@@ -552,6 +545,9 @@ class LightControl(QWidget):
         for view in self.viewer.views:
             view.set_prop(["shading_filter", "shininess"], value)
 
+def get_icon(name):
+    return QtGui.QIcon(os.path.join(LOCAL_FILE_PATH, "icons", name + ".png"))
+
 class TrackVis(QWidget):
 
     def __init__(self, voldata, xtract_dir):
@@ -562,21 +558,22 @@ class TrackVis(QWidget):
 
         hbox = QHBoxLayout()
         btn = QtWidgets.QPushButton()
-        btn.setIcon(QtGui.QIcon("coronal.png"))
+        print(os.path.join(LOCAL_FILE_PATH, "icons", "coronal.png"))
+        btn.setIcon(get_icon("coronal"))
         btn.setFixedSize(32, 32)
         btn.setIconSize(QtCore.QSize(30, 30))
         btn.setToolTip("Show/hide coronal view")
         btn.clicked.connect(self._cor_btn_clicked)
         hbox.addWidget(btn)
         btn = QtWidgets.QPushButton()
-        btn.setIcon(QtGui.QIcon("saggital.png"))
+        btn.setIcon(get_icon("saggital"))
         btn.setFixedSize(32, 32)
         btn.setIconSize(QtCore.QSize(30, 30))
         btn.setToolTip("Show/hide saggital view")
         btn.clicked.connect(self._sag_btn_clicked)
         hbox.addWidget(btn)
         btn = QtWidgets.QPushButton()
-        btn.setIcon(QtGui.QIcon("axial.png"))
+        btn.setIcon(get_icon("axial"))
         btn.setFixedSize(32, 32)
         btn.setIconSize(QtCore.QSize(30, 30))
         btn.setToolTip("Show/hide axial view")
@@ -608,6 +605,9 @@ class TrackVis(QWidget):
         self.views[0].widget.setVisible(not self.views[0].widget.isVisible())
 
 def main():
+    global LOCAL_FILE_PATH
+    LOCAL_FILE_PATH = os.path.dirname(__file__)
+
     # Handle CTRL-C 
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
