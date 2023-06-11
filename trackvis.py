@@ -34,7 +34,7 @@ class TrkView:
 
 class OrthoView(scene.SceneCanvas):
 
-    def __init__(self, axes):
+    def __init__(self, axes, **kwargs):
         """
         :param axes: Sequence of x, y, z axes for the view using RAS convention (0=R, 1=A, 2=S)"""
         scene.SceneCanvas.__init__(self, keys='interactive', size=(600, 600))
@@ -53,10 +53,13 @@ class OrthoView(scene.SceneCanvas):
         self._tractograms = {}
         self.widget = self.native
         self._miscvis = []
-
+        self._continuous_light_update = kwargs.get("continuous_light_update", True)
         cam = scene.ArcballCamera(center=self._pos)
         self._view.camera = cam
 
+        self._fixed_light_dir = [-1 if  idx == 1 and self.zaxis_ras == 0 else 1 for idx in range(3)] # Total hack
+        self._initial_light_dir = self._view.camera.transform.imap(self._fixed_light_dir)[:3]
+        self._current_light_dir = self._fixed_light_dir
         self.set_affine(np.identity(4))
 
     def set_affine(self, affine):
@@ -109,6 +112,17 @@ class OrthoView(scene.SceneCanvas):
             self.zpos = self.zpos + event.delta[1]
             self._update_bgvol()
         else:
+            update_light = (
+                event.type == "mouse_release" or
+                (event.type == "mouse_move" and event.button == 1 and self._continuous_light_update)
+            )
+            if update_light:
+                transform = self._view.camera.transform
+                dir = np.concatenate((self._initial_light_dir, [0]))
+                self._current_light_dir = transform.map(dir)[:3]
+                self.set_prop(["shading_filter", "light_dir"], self._current_light_dir)
+                self.update()
+
             from vispy.scene.events import SceneMouseEvent
             scene_event = SceneMouseEvent(event=event, visual=self._view)
             getattr(self._view.events, event.type)(scene_event)
@@ -192,6 +206,14 @@ class OrthoView(scene.SceneCanvas):
             for vis in t:
                 vis.transform = scene.transforms.MatrixTransform(np.dot(self._w2d.T, transforms.rotate(90, (1, 0, 0))))
 
+    def set_prop(self, props, value):
+        for t in self._tractograms.values():
+            for vis in t:
+                obj = vis
+                for prop in props[:-1]:
+                    obj = getattr(obj, prop)
+                setattr(obj, props[-1], value)
+
     def set_tractogram(self, name, streamlines, vertex_data, options, updated=()):
 
         if name not in self._tractograms or any([v in updated for v in ("style", "width", "subset")]):
@@ -202,9 +224,14 @@ class OrthoView(scene.SceneCanvas):
                 print(f"Vis: {idx+1}/{len(streamlines)}")
                 if options.get("style", "line") == "tube":
                     vis = scene.visuals.Tube(sldata, radius=options.get("width", 1), shading='smooth')
-                    vis.shading_filter.light_dir = [-1 if  idx == 1 and self.zaxis_ras == 0 else 1 for idx in range(3)] # Total hack
-                    vis.shading_filter.ambient_light = (1, 1, 1, 0.5)
-                    vis.shading_filter.shininess = 1000
+                    vis.shading_filter.light_dir = self._current_light_dir
+                    vis.shading_filter.ambient_light = 0.1
+                    vis.shading_filter.specular_light = 1.0
+                    vis.shading_filter.diffuse_light = 0.8
+                    vis.shading_filter.specular_coefficient = 1.0
+                    vis.shading_filter.diffuse_coefficient = 1.0
+                    vis.shading_filter.ambient_coefficient = 1.0
+                    vis.shading_filter.shininess = 50
                     vis.parent = self._scene
                 else:
                     vis = scene.visuals.Line(sldata, parent=self._scene) #  FIXME width
@@ -471,12 +498,66 @@ class DataSelection(QtWidgets.QWidget):
         vbox.addWidget(TractSelection(viewer))
         self.setLayout(vbox)
 
+class LightControl(QWidget):
+    def __init__(self, viewer):
+        QWidget.__init__(self)
+        self.viewer = viewer
+
+        hbox = QHBoxLayout()
+        self.setLayout(hbox)
+
+        hbox.addWidget(QtWidgets.QLabel("Ambient"))
+        self._aedit = QtWidgets.QLineEdit()
+        self._aedit.setText("1.0")
+        self._aedit.setValidator(QtGui.QDoubleValidator())
+        hbox.addWidget(self._aedit)
+        self._aedit.editingFinished.connect(self._aedit_changed)
+        hbox.addWidget(QtWidgets.QLabel("Diffuse"))
+        self._dedit = QtWidgets.QLineEdit()
+        self._dedit.setText("1.0")
+        self._dedit.setValidator(QtGui.QDoubleValidator())
+        hbox.addWidget(self._dedit)
+        self._dedit.editingFinished.connect(self._dedit_changed)
+        hbox.addWidget(QtWidgets.QLabel("Specular"))
+        self._sedit = QtWidgets.QLineEdit()
+        self._sedit.setText("1.0")
+        self._sedit.setValidator(QtGui.QDoubleValidator())
+        hbox.addWidget(self._sedit)
+        self._sedit.editingFinished.connect(self._sedit_changed)
+        hbox.addWidget(QtWidgets.QLabel("Shininess"))
+        self._shedit = QtWidgets.QLineEdit()
+        self._shedit.setText("100")
+        self._shedit.setValidator(QtGui.QIntValidator())
+        hbox.addWidget(self._shedit)
+        self._shedit.editingFinished.connect(self._shedit_changed)
+
+    def _aedit_changed(self):
+        value = float(self._aedit.text())
+        for view in self.viewer.views:
+            view.set_prop(["shading_filter", "ambient_coefficient"], value)
+
+    def _dedit_changed(self):
+        value = float(self._dedit.text())
+        for view in self.viewer.views:
+            view.set_prop(["shading_filter", "diffuse_coefficient"], value)
+
+    def _sedit_changed(self):
+        value = float(self._sedit.text())
+        for view in self.viewer.views:
+            view.set_prop(["shading_filter", "specular_coefficient"], value)
+
+    def _shedit_changed(self):
+        value = int(self._shedit.text())
+        for view in self.viewer.views:
+            view.set_prop(["shading_filter", "shininess"], value)
+
 class TrackVis(QWidget):
 
     def __init__(self, voldata, xtract_dir):
         QWidget.__init__(self)
         vbox = QVBoxLayout()
         vbox.addWidget(DataSelection(self))
+        vbox.addWidget(LightControl(self))
 
         hbox = QHBoxLayout()
         btn = QtWidgets.QPushButton()
