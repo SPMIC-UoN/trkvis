@@ -35,35 +35,96 @@ class TrkView:
             vertex_colors=np.repeat(all_vertex_colors[sl], 8, axis=0)
             trk_obj = scene.visuals.Tube(sldata, radius=self._radius, vertex_colors=vertex_colors, parent=view.scene)
 
-class OrthoView(scene.SceneCanvas):
+class View(scene.SceneCanvas):
 
-    def __init__(self, axes, **kwargs):
+    CAM_PARAMS = [
+        (90, 0, 0),
+        (0, 0, 0),
+        (0, 90, 0),
+    ]
+
+    def __init__(self, **kwargs):
         """
-        :param axes: Sequence of x, y, z axes for the view using RAS convention (0=R, 1=A, 2=S)"""
+        """
         scene.SceneCanvas.__init__(self, keys='interactive', size=(600, 600))
         self.unfreeze()
 
-        #if sorted(list(np.abs(axes[:3]))) != [0, 1, 2]:
-        #    raise ValueError(f"Invalid axes: {axes}")
-        
-        self._display2ras = axes[:3]
-        self._flip_display = axes[3]
+        self._zaxis = 2
         self._view = self.central_widget.add_view()
         self._scene = self._view.scene
-        self._shape = [1, 1, 1]
         self._pos = [0, 0, 0]
+        self._bgvol = np.zeros((1, 1, 1), dtype=np.float32)
+        self._clim = None
         self._bgvis = None
         self._tractograms = {}
-        self.widget = self.native
-        self._miscvis = []
-        self._continuous_light_update = kwargs.get("continuous_light_update", True)
-        cam = scene.ArcballCamera(center=self._pos)
-        self._view.camera = cam
+        self._texture_format = kwargs.get("texture_format", "auto")
 
-        self._fixed_light_dir = [-1 if  idx == 1 and self.zaxis_ras == 0 else 1 for idx in range(3)] # Total hack
+        self._view.camera = scene.TurntableCamera()
+        self._fixed_light_dir = [1, 1, 1]
         self._initial_light_dir = self._view.camera.transform.imap(self._fixed_light_dir)[:3]
         self._current_light_dir = self._fixed_light_dir
+        self._continuous_light_update = kwargs.get("continuous_light_update", True)
+        self._ambient = 0.1
+        self._specular = 1.0
+        self._diffuse = 0.8
+        self._shininess = 50
+
         self.set_affine(np.identity(4))
+        self.zaxis = 2
+
+    @property
+    def widget(self):
+        return self.native
+
+    @property
+    def shape(self):
+        return list(self._bgvol.shape[:3])
+
+    @property
+    def zaxis(self):
+        return self._zaxis
+
+    @zaxis.setter
+    def zaxis(self, axis):
+        self._zaxis = axis
+        self._update_bgvol()
+        if axis >= 0:
+            cam_params = self.CAM_PARAMS[self._zaxis]
+            self._view.camera.azimuth = cam_params[0]
+            self._view.camera.elevation = cam_params[1]
+            self._view.camera.roll = cam_params[2]
+            self._update_light()
+
+    @property
+    def zpos(self):
+        return self._pos[self._ras2data[self.zaxis]]
+    
+    @zpos.setter
+    def zpos(self, zpos):
+        self._pos[self._ras2data[self.zaxis]] = int(zpos)
+
+    def _process_mouse_event(self, event):
+        if event.type == "mouse_wheel":
+            self.zpos = max(0, self.zpos + event.delta[1])
+            self._update_bgvol()
+        else:
+            update_light = (
+                event.type == "mouse_release" or
+                (event.type == "mouse_move" and event.button == 1 and self._continuous_light_update)
+            )
+            if update_light:
+                self._update_light()
+               
+            from vispy.scene.events import SceneMouseEvent
+            scene_event = SceneMouseEvent(event=event, visual=self._view)
+            getattr(self._view.events, event.type)(scene_event)
+
+    def _update_light(self):
+        transform = self._view.camera.transform
+        dir = np.concatenate((self._initial_light_dir, [0]))
+        self._current_light_dir = transform.map(dir)[:3]
+        self.set_prop(["shading_filter", "light_dir"], self._current_light_dir)
+        self.update()
 
     def set_affine(self, affine):
         """
@@ -72,10 +133,6 @@ class OrthoView(scene.SceneCanvas):
         :return: List of four integers giving the axes indices of the R, A and S axes.
                  The fourth integer is always 3 indicating the volume axis
         """
-        self._ras2display = [0, 0, 0]
-        for display_axis, ras_axis in enumerate(self._display2ras):
-            self._ras2display[ras_axis] = display_axis
-
         self._v2w = affine
         transform = self._v2w[:3, :3]
         # Sequence defining which RAS axis is identified with each data axis
@@ -92,121 +149,82 @@ class OrthoView(scene.SceneCanvas):
         print("RAS->data axis sequence: ", self._ras2data)
         print("RAS axes that are flipped in data: ", self._flip_ras)
 
-        zaxis_data = self._ras2data[self.zaxis_ras]
-        slices = [slice(None)] * 3
-        slices[zaxis_data] = self.zpos
-        print("Slicing data on axis: ", zaxis_data)
-
-        # Identify which data axis is identified with each display axis
-        # and which data axes need to be flipped
-        self._display2data = [self._ras2data[ax] for ax in self._display2ras]
-        self._flip_display = []
-        for display_axis, data_axis in enumerate(self._display2data):
-            if self._data2ras[data_axis] in self._flip_ras:
-                self._flip_display.append(display_axis)
-        print("Axis transposition/flip for display: ", self._display2ras, self._display2data, self._flip_display)
-
-        w2v = np.linalg.inv(self._v2w)
-        i = np.identity(4)
-        v2d = np.identity(4)
-        for ras_axis, display_axis in enumerate(self._ras2display):
-            v2d[display_axis, :] = i[ras_axis, :]
-        for d in self._flip_display:
-            v2d[d, :] = -v2d[d, :]
-            v2d[d, 3] = self._shape[d]-1
-        self._w2d= np.dot(v2d, w2v)
-        tract_transform = scene.transforms.MatrixTransform(np.dot(self._w2d.T, transforms.rotate(90, (1, 0, 0))))
-        self.set_prop("transform", tract_transform)
-
-    def showEvent(self, event):
-        print('in showEvent')
-        scene.SceneCanvas.showEvent(event)
-
-    def _process_mouse_event(self, event):
-        if event.type == "mouse_wheel":
-            self.zpos = self.zpos + event.delta[1]
-            self._update_bgvol()
-        else:
-            update_light = (
-                event.type == "mouse_release" or
-                (event.type == "mouse_move" and event.button == 1 and self._continuous_light_update)
-            )
-            if update_light:
-                transform = self._view.camera.transform
-                dir = np.concatenate((self._initial_light_dir, [0]))
-                self._current_light_dir = transform.map(dir)[:3]
-                self.set_prop(["shading_filter", "light_dir"], self._current_light_dir)
-                self.update()
-
-            from vispy.scene.events import SceneMouseEvent
-            scene_event = SceneMouseEvent(event=event, visual=self._view)
-            getattr(self._view.events, event.type)(scene_event)
-
-    @property
-    def zaxis_ras(self):
-        return self._display2ras[2]
-
-    @property
-    def zaxis_data(self):
-        return self._ras2data[self.zaxis_ras]
-
-    @property
-    def zpos(self):
-        return self._pos[self.zaxis_data]
-
-    @zpos.setter
-    def zpos(self, zpos):
-        self._pos[self.zaxis_data] = int(zpos)
-
-    def set_bgvol(self, data, affine, clim=None, texture_format="auto"):
-        self._bgvol = data
-        self._shape = data.shape
-        self._pos = [s//2 for s in self._shape[:3]]
+    def set_bgvol(self, data, affine, clim=None):
+        self._bgvol = data.astype(np.float32)
         self.set_affine(affine)
-        self._texture_format = texture_format
         self._clim = clim
+        self._pos = [s // 2 for s in self.shape]
 
-        data_range = [(0, self._shape[d]) for d in range(3)]
-        self._view.camera.set_range(*data_range)
-        cam_centre = list(self._pos)
-        cam_centre[1] = -cam_centre[1]
-        self._view.camera.center = cam_centre
-        # Left = Right for radiological perspective
-        self._view.camera.flip = [True if self._ras2display[idx] == 0 else False for idx in range(3)]
+        world_min = np.dot(self._v2w, [0, 0, 0, 1])[:3]
+        world_max = np.dot(self._v2w, np.array(self.shape + [1]))[:3]
+        world_origin = self._v2w[:, 3][:3]
+        print("World space extent: ", world_min, world_max)
+        self._extent = list(zip(world_min, world_max))
+        self._view.camera.set_range(*self._extent)
+        self._view.camera.centre = world_origin
         self._update_bgvol()
 
-    def _update_bgvol(self):     
-        self._data_local = np.transpose(self._bgvol, self._display2data)
-        for dim in self._flip_display:
-            self._data_local = np.flip(self._data_local, dim)
- 
+    def _update_bgvol(self):
         if self._bgvis is not None:
             self._bgvis.parent = None
 
-        for vis in self._miscvis:
-            vis.parent = None
-        self._miscvis = []
+        if self.zaxis < 0:
+                
+            self._bgvis = scene.visuals.Volume(
+                self._bgvol.T,
+                cmap='grays', clim=self._clim,
+                texture_format=self._texture_format,
+                method="mip",
+                parent=self._scene
+            )
+            self._bgvis.transform = scene.transforms.MatrixTransform(self._v2w.T)
+            from vispy.visuals.filters import Alpha
+            self._bgvis.attach(Alpha(0.5))
+        else:
+            zaxis_data = self._ras2data[self.zaxis]
+            self._data_slices = [slice(None)] * 3
+            slxy = []
+            for data_axis in range(3):
+                ras_axis = self._data2ras[data_axis]
+                if ras_axis == self.zaxis:
+                    self._data_slices[data_axis] = self.zpos
+                else:
+                    slxy.append(ras_axis)
+            self._data_slices = tuple(self._data_slices)
+            #print("Slicing data on axis: ", zaxis_data, self._data_slices)
 
-        self._bgvis = scene.visuals.Image(
-            self._data_local[:, :, self.zpos].T,
-            cmap='grays', clim=self._clim,
-            fg_color=(0.5, 0.5, 0.5, 1), 
-            texture_format=self._texture_format, 
-            parent=self._scene
-        )
-        tvec = [0, 0, 0]
-        tvec[self.zaxis_data] = self.zpos
-        img2axis = transforms.translate((0, 0, self.zpos))
-        img2axis = np.dot(img2axis, transforms.rotate(90, (1, 0, 0)))
-        self._bgvis.transform = scene.transforms.MatrixTransform(img2axis)
+            self._data_slice = self._bgvol[self._data_slices]
+            
+            self._bgvis = scene.visuals.Image(
+                self._data_slice,
+                cmap='grays', clim=self._clim,
+                fg_color=(0.5, 0.5, 0.5, 1), 
+                texture_format=self._texture_format, 
+                parent=self._scene
+            )
+            base_transforms = [
+                np.array([[0, 0, 1, 0], [0, 1, 0, 0], [1, 0, 0, 0], [0, 0, 0, 1]]),
+                np.array([[0, 1, 0, 0], [0, 0, 1, 0], [1, 0, 0, 0], [0, 0, 0, 1]]),
+                np.array([[0, 1, 0, 0], [1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]),
+            ]
+            img2ras = base_transforms[self.zaxis].T
+            #print(img2ras.T)
+            t = transforms.translate((0, 0, self.zpos))
+            #print(t)
+            v2ras = np.dot(np.dot(t, img2ras), self._v2w.T)
+            #print("Slice->world transform:\n", v2ras)
+            self._bgvis.transform = scene.transforms.MatrixTransform(v2ras)
 
     def set_prop(self, props, value):
         for t in self._tractograms.values():
             for vis in t:
-                obj = vis
-                for prop in props[:-1]:
-                    obj = getattr(obj, prop)
-                setattr(obj, props[-1], value)
+                try:
+                    obj = vis
+                    for prop in props[:-1]:
+                        obj = getattr(obj, prop)
+                    setattr(obj, props[-1], value)
+                except AttributeError:
+                    continue
 
     def set_tractogram(self, name, streamlines, vertex_data, options, updated=()):
 
@@ -219,17 +237,13 @@ class OrthoView(scene.SceneCanvas):
                 if options.get("style", "line") == "tube":
                     vis = scene.visuals.Tube(sldata, radius=options.get("width", 1), shading='smooth')
                     vis.shading_filter.light_dir = self._current_light_dir
-                    vis.shading_filter.ambient_light = 0.1
-                    vis.shading_filter.specular_light = 1.0
-                    vis.shading_filter.diffuse_light = 0.8
-                    vis.shading_filter.specular_coefficient = 1.0
-                    vis.shading_filter.diffuse_coefficient = 1.0
-                    vis.shading_filter.ambient_coefficient = 1.0
-                    vis.shading_filter.shininess = 50
+                    vis.shading_filter.ambient_light = self._ambient
+                    vis.shading_filter.specular_light = self._specular
+                    vis.shading_filter.diffuse_light = self._diffuse
+                    vis.shading_filter.shininess = self._shininess
                     vis.parent = self._scene
                 else:
-                    vis = scene.visuals.Line(sldata, parent=self._scene) #  FIXME width
-                vis.transform = scene.transforms.MatrixTransform(np.dot(self._w2d.T, transforms.rotate(90, (1, 0, 0))))
+                    vis = scene.visuals.Line(sldata, parent=self._scene, method="gl", antialias=True) #  FIXME width
                 visuals.append(vis)
             self._tractograms[name] = visuals
 
@@ -267,25 +281,6 @@ class OrthoView(scene.SceneCanvas):
         img = self.render()
         io.write_png(fname, img)
 
-class VolumeView(OrthoView):
-
-    def _update_bgvol(self):
-        self._view.camera.flip = [False,] * 3
-        self._data_local = self._bgvol
- 
-        if self._bgvis is not None:
-            self._bgvis.parent = None
-
-        self._bgvis = scene.visuals.Volume(
-            self._data_local.T,
-            cmap='grays', clim=self._clim,
-            texture_format=self._texture_format,
-            method="mip",
-            parent=self._scene
-        )
-        img2axis = transforms.rotate(90, (1, 0, 0))
-        self._bgvis.transform = scene.transforms.MatrixTransform(img2axis)
-
 class VolumeSelection(QWidget):
 
     def __init__(self, viewer):
@@ -310,8 +305,7 @@ class VolumeSelection(QWidget):
                 nii = nib.load(fname)
                 data = nii.get_fdata()
                 affine = nii.header.get_best_affine()
-                for view in self._viewer.views:
-                    view.set_bgvol(data, affine)
+                self._viewer.view.set_bgvol(data, affine)
                 self._edit.setText(fname)
             except:
                 import traceback
@@ -477,9 +471,7 @@ class TractSelection(QWidget):
     def _choose_file(self):
         xtract_dir = QtWidgets.QFileDialog.getExistingDirectory()
         if xtract_dir:
-            for view in self._viewer.views:
-                view.clear_tractograms()
-            
+            self._viewer.view.clear_tractograms()
             self._set_xtract_dir(xtract_dir)
 
     def _tract_changed(self, idx):
@@ -496,11 +488,10 @@ class TractSelection(QWidget):
         self._tract_combo.setItemData(cur_tract_idx, (cur_tractogram, new_options))
 
         if updated:
-            for view in self._viewer.views:
-                if new_options["style"] == "none":
-                    view.remove_tractogram(name)
-                else:
-                    view.set_tractogram(name, self._tract_view.streamlines, self._tract_view.vertex_data, new_options, updated)
+            if new_options["style"] == "none":
+                self._viewer.view.remove_tractogram(name)
+            else:
+                self._viewer.view.set_tractogram(name, self._tract_view.streamlines, self._tract_view.vertex_data, new_options, updated)
 
 class DataSelection(QtWidgets.QWidget):
     def __init__(self, viewer):
@@ -546,23 +537,19 @@ class LightControl(QWidget):
 
     def _aedit_changed(self):
         value = float(self._aedit.text())
-        for view in self.viewer.views:
-            view.set_prop(["shading_filter", "ambient_coefficient"], value)
+        self.viewer.view.set_prop(["shading_filter", "ambient_coefficient"], value)
 
     def _dedit_changed(self):
         value = float(self._dedit.text())
-        for view in self.viewer.views:
-            view.set_prop(["shading_filter", "diffuse_coefficient"], value)
+        self.viewer.view.set_prop(["shading_filter", "diffuse_coefficient"], value)
 
     def _sedit_changed(self):
         value = float(self._sedit.text())
-        for view in self.viewer.views:
-            view.set_prop(["shading_filter", "specular_coefficient"], value)
+        self.viewer.view.set_prop(["shading_filter", "specular_coefficient"], value)
 
     def _shedit_changed(self):
         value = int(self._shedit.text())
-        for view in self.viewer.views:
-            view.set_prop(["shading_filter", "shininess"], value)
+        self.viewer.view.set_prop(["shading_filter", "shininess"], value)
 
 def get_icon(name):
     return QtGui.QIcon(os.path.join(LOCAL_FILE_PATH, "icons", name + ".png"))
@@ -573,7 +560,7 @@ class TrackVis(QWidget):
         QWidget.__init__(self)
         vbox = QVBoxLayout()
         vbox.addWidget(DataSelection(self))
-        vbox.addWidget(LightControl(self))
+        #vbox.addWidget(LightControl(self))
 
         hbox = QHBoxLayout()
 
@@ -581,7 +568,7 @@ class TrackVis(QWidget):
         btn.setIcon(get_icon("axial"))
         btn.setFixedSize(32, 32)
         btn.setIconSize(QtCore.QSize(30, 30))
-        btn.setToolTip("Show/hide axial view")
+        btn.setToolTip("Axial view")
         btn.clicked.connect(self._ax_btn_clicked)
         hbox.addWidget(btn)
 
@@ -589,7 +576,7 @@ class TrackVis(QWidget):
         btn.setIcon(get_icon("saggital"))
         btn.setFixedSize(32, 32)
         btn.setIconSize(QtCore.QSize(30, 30))
-        btn.setToolTip("Show/hide saggital view")
+        btn.setToolTip("Saggital view")
         btn.clicked.connect(self._sag_btn_clicked)
         hbox.addWidget(btn)
 
@@ -597,8 +584,16 @@ class TrackVis(QWidget):
         btn.setIcon(get_icon("coronal"))
         btn.setFixedSize(32, 32)
         btn.setIconSize(QtCore.QSize(30, 30))
-        btn.setToolTip("Show/hide coronal view")
+        btn.setToolTip("Coronal view")
         btn.clicked.connect(self._cor_btn_clicked)
+        hbox.addWidget(btn)
+
+        btn = QtWidgets.QPushButton()
+        btn.setIcon(get_icon("3d"))
+        btn.setFixedSize(32, 32)
+        btn.setIconSize(QtCore.QSize(30, 30))
+        btn.setToolTip("3D volume view")
+        btn.clicked.connect(self._vol_btn_clicked)
         hbox.addWidget(btn)
 
         hbox.addStretch()
@@ -607,28 +602,22 @@ class TrackVis(QWidget):
         hbox = QHBoxLayout()
         vbox.addLayout(hbox, stretch=2)
         
-        self.views = []
-        for axis_mapping in [
-            (0, 1, 2, [2]),
-            (1, 2, 0, []),
-            (0, 2, 1, []),
-        ]:
-            view = OrthoView(axis_mapping)
-            hbox.addWidget(view.widget, stretch=1)
-            self.views.append(view)
-
-        view = VolumeView((0, 1, 2, [2]))
-        hbox.addWidget(view.widget, stretch=1)
-        self.views.append(view)
+        self.view = View()
+        hbox.addWidget(self.view.widget, stretch=1)
 
         self.setLayout(vbox)
 
     def _cor_btn_clicked(self):
-        self.views[1].widget.setVisible(not self.views[1].widget.isVisible())
+        self.view.zaxis = 0
+
     def _sag_btn_clicked(self):
-        self.views[2].widget.setVisible(not self.views[2].widget.isVisible())
+        self.view.zaxis = 1
+
     def _ax_btn_clicked(self):
-        self.views[0].widget.setVisible(not self.views[0].widget.isVisible())
+        self.view.zaxis = 2
+
+    def _vol_btn_clicked(self):
+        self.view.zaxis = -1
 
 def main():
     global LOCAL_FILE_PATH
