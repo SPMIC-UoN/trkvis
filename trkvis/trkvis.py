@@ -12,47 +12,34 @@ import numpy as np
 from PySide2.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout
 from PySide2 import QtWidgets, QtGui, QtCore
 
-from vispy import io, plot as vp, visuals
-
-from vispy import app, scene
+import vispy.io
+from vispy import scene
 from vispy.util import transforms
 from vispy.color import Color, colormap
-from vispy.visuals.filters import ShadingFilter
+from vispy.visuals.filters import Alpha
 
 LOCAL_FILE_PATH = ""
-
-class TrkView:
-
-    def __init__(self, view, tractogram, cmap="viridis", radius=0.5):
-        cmap = colormap.get_colormap(cmap)
-        self._radius = radius
-        densities = tractogram.data_per_point['densities']
-        densities_norm = [(d - np.min(d)) / (np.max(d) - np.min(d)) for d in densities]
-        all_vertex_colors = [cmap.map(d) for d in densities_norm]
-
-        for sl in range(len(tractogram.streamlines[::10])):
-            sldata = tractogram.streamlines[sl]
-            vertex_colors=np.repeat(all_vertex_colors[sl], 8, axis=0)
-            trk_obj = scene.visuals.Tube(sldata, radius=self._radius, vertex_colors=vertex_colors, parent=view.scene)
 
 class View(scene.SceneCanvas):
 
     CAM_PARAMS = [
-        (90, 0, 0),
-        (0, 0, 0),
-        (0, 90, 0),
+        [(90, 0, 0), (-90, 0, 0)],
+        [(0, 0, 0), (180, 0, 0)],
+        [(0, 90, 0), (180, -90, 0)],
     ]
 
     def __init__(self, **kwargs):
         """
+        Viewer for background volume / tractography
         """
-        scene.SceneCanvas.__init__(self, keys='interactive', size=(600, 600))
+        scene.SceneCanvas.__init__(self, show=False, size=(600, 600))
         self.unfreeze()
 
         self._zaxis = 2
         self._view = self.central_widget.add_view()
         self._scene = self._view.scene
         self._pos = [0, 0, 0]
+        self._invert = False
         self._bgvol = np.zeros((1, 1, 1), dtype=np.float32)
         self._clim = None
         self._bgvis = None
@@ -89,12 +76,21 @@ class View(scene.SceneCanvas):
         self._zaxis = axis
         self._update_bgvol()
         if axis >= 0:
-            cam_params = self.CAM_PARAMS[self._zaxis]
+            cam_params = self.CAM_PARAMS[self._zaxis][1 if self._invert else 0]
             self._view.camera.azimuth = cam_params[0]
             self._view.camera.elevation = cam_params[1]
             self._view.camera.roll = cam_params[2]
             self._update_light()
 
+    @property
+    def invert(self):
+        return self._invert
+    
+    @invert.setter
+    def invert(self, invert):
+        self._invert = invert
+        self.zaxis = self._zaxis
+    
     @property
     def zpos(self):
         return self._pos[self._ras2data[self.zaxis]]
@@ -137,7 +133,7 @@ class View(scene.SceneCanvas):
         transform = self._v2w[:3, :3]
         # Sequence defining which RAS axis is identified with each data axis
         self._data2ras = [np.argmax(np.abs(transform[:, axis])) for axis in range(3)]
-        print("Data->RAS axis sequence: ", self._data2ras)
+        #print("Data->RAS axis sequence: ", self._data2ras)
         
         # Sequence defining which data axis is identified with each RAS axis
         # and which RAS axes are flipped in the data
@@ -146,8 +142,8 @@ class View(scene.SceneCanvas):
         for ras_axis, data_axis in enumerate(self._ras2data):
             if transform[data_axis, ras_axis] < 0:
                 self._flip_ras.append(ras_axis)
-        print("RAS->data axis sequence: ", self._ras2data)
-        print("RAS axes that are flipped in data: ", self._flip_ras)
+        #print("RAS->data axis sequence: ", self._ras2data)
+        #print("RAS axes that are flipped in data: ", self._flip_ras)
 
     def set_bgvol(self, data, affine, clim=None):
         self._bgvol = data.astype(np.float32)
@@ -158,7 +154,7 @@ class View(scene.SceneCanvas):
         world_min = np.dot(self._v2w, [0, 0, 0, 1])[:3]
         world_max = np.dot(self._v2w, np.array(self.shape + [1]))[:3]
         world_origin = self._v2w[:, 3][:3]
-        print("World space extent: ", world_min, world_max)
+        #print("World space extent: ", world_min, world_max)
         self._extent = list(zip(world_min, world_max))
         self._view.camera.set_range(*self._extent)
         self._view.camera.centre = world_origin
@@ -178,7 +174,6 @@ class View(scene.SceneCanvas):
                 parent=self._scene
             )
             self._bgvis.transform = scene.transforms.MatrixTransform(self._v2w.T)
-            from vispy.visuals.filters import Alpha
             self._bgvis.attach(Alpha(0.5))
         else:
             zaxis_data = self._ras2data[self.zaxis]
@@ -274,12 +269,26 @@ class View(scene.SceneCanvas):
             del self._tractograms[name]
 
     def clear_tractograms(self):
-        for t in self._tractograms:
+        for t in list(self._tractograms.keys()):
             self.remove_tractogram(t)
 
-    def to_png(self, fname):
-        img = self.render()
-        io.write_png(fname, img)
+    def to_png(self, fname, size=None):
+        from vispy.gloo.util import _screenshot
+        from vispy import gloo
+        #img = _screenshot()
+        size = (2048, 2048)
+        rendertex = gloo.Texture2D(shape=size + (4,))
+        fbo = gloo.FrameBuffer(rendertex, gloo.RenderBuffer(size))
+        
+        with fbo:
+            gloo.clear(depth=True)
+            gloo.set_viewport(0, 0, *size)
+            self.render()
+            self.update()
+            screenshot = gloo.read_pixels((0, 0, *size), True)
+
+        #img = self.render(size=size, alpha=False)
+        vispy.io.write_png(fname, screenshot)
 
 class VolumeSelection(QWidget):
 
@@ -344,7 +353,7 @@ class TractView(QWidget):
         hbox.addWidget(QtWidgets.QLabel("Subset"))
         self._subset_edit = QtWidgets.QLineEdit()
         self._subset_edit.setText("50")
-        self._width_edit.setValidator(QtGui.QIntValidator())
+        self._subset_edit.setValidator(QtGui.QIntValidator())
         self._subset_edit.editingFinished.connect(self._changed)
         hbox.addWidget(self._subset_edit, stretch=1)
 
@@ -399,7 +408,7 @@ class TractView(QWidget):
             self.tractogram = tractogram
             self._style_combo.setCurrentIndex(self._style_combo.findText(options.get("style", "none")))
             self._width_edit.setText(str(options.get("width", 1)))
-            self._subset_edit.setText(str(options.get("subset", 50)))
+            self._subset_edit.setText(str(options.get("subset", int(round(float(len(tractogram.streamlines)) / 500) * 10))))
             self._color_combo.setCurrentIndex(self._color_combo.findText(options.get("color", "red")))
             self._color_by_combo.clear()
             self._color_by_combo.addItem("None")
@@ -457,9 +466,16 @@ class TractSelection(QWidget):
 
         self.setLayout(self._vbox)
 
-    def _set_xtract_dir(self, xtract_dir):
-        self._edit.setText(xtract_dir)
-        self._tract_dir = os.path.join(xtract_dir, "tracts")
+    def _get_tract_dir(self, indir):
+        xtract_tract_dir = os.path.join(indir, "tracts")
+        if os.path.isdir(xtract_tract_dir):
+            return xtract_tract_dir
+        else:
+            return indir
+
+    def _set_input_dir(self, indir):
+        self._edit.setText(indir)
+        self._tract_dir = self._get_tract_dir(indir)
         self._tract_combo.clear()
         for dname in os.listdir(self._tract_dir):
             if os.path.isdir(os.path.join(self._tract_dir, dname)) and os.path.exists(os.path.join(self._tract_dir, dname, "streamlines.trk")):
@@ -469,10 +485,10 @@ class TractSelection(QWidget):
         self._vbox.addStretch()
 
     def _choose_file(self):
-        xtract_dir = QtWidgets.QFileDialog.getExistingDirectory()
-        if xtract_dir:
+        input_dir = QtWidgets.QFileDialog.getExistingDirectory()
+        if input_dir:
             self._viewer.view.clear_tractograms()
-            self._set_xtract_dir(xtract_dir)
+            self._set_input_dir(input_dir)
 
     def _tract_changed(self, idx):
         name = self._tract_combo.itemText(idx)
@@ -556,7 +572,7 @@ def get_icon(name):
 
 class TrackVis(QWidget):
 
-    def __init__(self, voldata, xtract_dir):
+    def __init__(self):
         QWidget.__init__(self)
         vbox = QVBoxLayout()
         vbox.addWidget(DataSelection(self))
@@ -596,6 +612,22 @@ class TrackVis(QWidget):
         btn.clicked.connect(self._vol_btn_clicked)
         hbox.addWidget(btn)
 
+        btn = QtWidgets.QPushButton()
+        btn.setIcon(get_icon("flip"))
+        btn.setFixedSize(32, 32)
+        btn.setIconSize(QtCore.QSize(30, 30))
+        btn.setToolTip("Flip")
+        btn.clicked.connect(self._flip)
+        hbox.addWidget(btn)
+
+        #btn = QtWidgets.QPushButton("Save")
+        #btn.setIcon(get_icon("3d"))
+        #btn.setFixedSize(32, 32)
+        #btn.setIconSize(QtCore.QSize(30, 30))
+        #btn.setToolTip("Save")
+        #btn.clicked.connect(self._save)
+        #hbox.addWidget(btn)
+
         hbox.addStretch()
         vbox.addLayout(hbox)
         
@@ -619,6 +651,12 @@ class TrackVis(QWidget):
     def _vol_btn_clicked(self):
         self.view.zaxis = -1
 
+    def _flip(self):
+        self.view.invert = not self.view.invert
+
+    def _save(self):
+        self.view.to_png("trkvis.png")
+
 def main():
     global LOCAL_FILE_PATH
     LOCAL_FILE_PATH = os.path.dirname(__file__)
@@ -627,6 +665,10 @@ def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     app = QApplication(sys.argv)
-    win = TrackVis("MNI152_T1_2mm.nii.gz", "xtract_results")
+    win = TrackVis()
     win.show()
+    
+    #nii = nib.load("MNI152_T1_2mm.nii.gz")
+    #win.view.set_bgvol(nii.get_fdata(), nii.affine)
+    #win._save()
     sys.exit(app.exec_())
