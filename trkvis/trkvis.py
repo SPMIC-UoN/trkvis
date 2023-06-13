@@ -1,4 +1,3 @@
-
 """
 Simple tractography visualisation
 """
@@ -56,7 +55,7 @@ class View(scene.SceneCanvas):
         self._diffuse = 0.8
         self._shininess = 50
 
-        self.set_affine(np.identity(4))
+        self._set_affine(np.identity(4))
         self.zaxis = 2
 
     @property
@@ -116,13 +115,17 @@ class View(scene.SceneCanvas):
             getattr(self._view.events, event.type)(scene_event)
 
     def _update_light(self):
+        """
+        Update light direction so it always seems to come from the same place
+        relative to camera
+        """
         transform = self._view.camera.transform
         dir = np.concatenate((self._initial_light_dir, [0]))
         self._current_light_dir = transform.map(dir)[:3]
         self.set_prop(["shading_filter", "light_dir"], self._current_light_dir)
         self.update()
 
-    def set_affine(self, affine):
+    def _set_affine(self, affine):
         """
         Get the grid axes which best correspond to the RAS axes
 
@@ -147,7 +150,7 @@ class View(scene.SceneCanvas):
 
     def set_bgvol(self, data, affine, clim=None):
         self._bgvol = data.astype(np.float32)
-        self.set_affine(affine)
+        self._set_affine(affine)
         self._clim = clim
         self._pos = [s // 2 for s in self.shape]
 
@@ -165,7 +168,6 @@ class View(scene.SceneCanvas):
             self._bgvis.parent = None
 
         if self.zaxis < 0:
-                
             self._bgvis = scene.visuals.Volume(
                 self._bgvol.T,
                 cmap='grays', clim=self._clim,
@@ -187,7 +189,6 @@ class View(scene.SceneCanvas):
                     slxy.append(ras_axis)
             self._data_slices = tuple(self._data_slices)
             #print("Slicing data on axis: ", zaxis_data, self._data_slices)
-
             self._data_slice = self._bgvol[self._data_slices]
             
             self._bgvis = scene.visuals.Image(
@@ -197,6 +198,8 @@ class View(scene.SceneCanvas):
                 texture_format=self._texture_format, 
                 parent=self._scene
             )
+            # Image seems to default to XZ plane so need to transform it to right plane
+            # Ought to be possible to derive this from zaxis but not found a way so far...
             base_transforms = [
                 np.array([[0, 0, 1, 0], [0, 1, 0, 0], [1, 0, 0, 0], [0, 0, 0, 1]]),
                 np.array([[0, 1, 0, 0], [0, 0, 1, 0], [1, 0, 0, 0], [0, 0, 0, 1]]),
@@ -220,47 +223,76 @@ class View(scene.SceneCanvas):
                     setattr(obj, props[-1], value)
                 except AttributeError:
                     continue
+    
+    def _create_tubes(self, streamlines, options):
+        visuals = []
+        for idx, sldata in enumerate(streamlines):
+            print(f"Vis: {idx+1}/{len(streamlines)}")
+            vis = scene.visuals.Tube(sldata, radius=options.get("width", 1), shading='smooth')
+            vis.shading_filter.light_dir = self._current_light_dir
+            vis.shading_filter.ambient_light = self._ambient
+            vis.shading_filter.specular_light = self._specular
+            vis.shading_filter.diffuse_light = self._diffuse
+            vis.shading_filter.shininess = self._shininess
+            vis.parent = self._scene
+            visuals.append(vis)
+        return visuals
+     
+    def _create_lines(self, streamlines, options):
+        connections = []
+        for idx, sldata in enumerate(streamlines):
+            connect = np.ones(sldata.shape[0], dtype=bool)
+            connect[-1] = False
+            connections.append(connect)
+        connections = np.concatenate(connections)
+        coords = np.concatenate(streamlines, axis=0)
+        vis = scene.visuals.Line(coords, connect=connections, parent=self._scene, method="gl", antialias=True) #  FIXME width
+        return [vis]
 
-    def set_tractogram(self, name, streamlines, vertex_data, options, updated=()):
+    def _update_tubes(self, visuals, vertex_colors, options):
+        for idx, vis in enumerate(visuals):
+            md = vis.mesh_data
+            if vertex_colors is not None:
+                vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), vertex_colors=np.repeat(vertex_colors[idx], 8, axis=0))
+            else:
+                vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), color=options.get("color", "red"))
 
-        if name not in self._tractograms or any([v in updated for v in ("style", "width", "subset")]):
-            self.remove_tractogram(name)
-            streamlines = streamlines[::options.get("subset", 20)]
-            visuals = []
-            for idx, sldata in enumerate(streamlines):
-                print(f"Vis: {idx+1}/{len(streamlines)}")
-                if options.get("style", "line") == "tube":
-                    vis = scene.visuals.Tube(sldata, radius=options.get("width", 1), shading='smooth')
-                    vis.shading_filter.light_dir = self._current_light_dir
-                    vis.shading_filter.ambient_light = self._ambient
-                    vis.shading_filter.specular_light = self._specular
-                    vis.shading_filter.diffuse_light = self._diffuse
-                    vis.shading_filter.shininess = self._shininess
-                    vis.parent = self._scene
-                else:
-                    vis = scene.visuals.Line(sldata, parent=self._scene, method="gl", antialias=True) #  FIXME width
-                visuals.append(vis)
-            self._tractograms[name] = visuals
+    def _update_lines(self, visuals, vertex_colors, options):
+        vis = visuals[0]
+        pos = vis.pos
+        if vertex_colors is not None:
+            vertex_colors = np.concatenate(vertex_colors, axis=0)
+            vis.set_data(pos=pos, color=vertex_colors)
+        else:
+            vis.set_data(pos=pos, color=options.get("color", "red"))
 
+    def _get_vertex_colors(self, vertex_data, options):
         if vertex_data is not None:
             vertex_data = vertex_data[::options.get("subset", 20)]
             cmap = colormap.get_colormap(options.get("cmap", "viridis"))
             vertex_data_norm = [(d - np.min(d)) / (np.max(d) - np.min(d)) for d in vertex_data]
-            vertex_colors = [cmap.map(d) for d in vertex_data_norm]
+            return [cmap.map(d) for d in vertex_data_norm]
 
-        for idx, vis in enumerate(self._tractograms[name]):
+    def set_tractogram(self, name, streamlines, vertex_data, options, updated=()):
+        """
+        Add or update a tractogram view
+        """
+        if name not in self._tractograms or any([v in updated for v in ("style", "width", "subset")]):
+            self.remove_tractogram(name)
+            streamlines = streamlines[::options.get("subset", 20)]
             if options.get("style", "line") == "tube":
-                md = vis.mesh_data
-                if vertex_data is not None:
-                    vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), vertex_colors=np.repeat(vertex_colors[idx], 8, axis=0))
-                else:
-                    vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), color=options.get("color", "red"))
+                visuals = self._create_tubes(streamlines, options)
             else:
-                pos = vis.pos
-                if vertex_data is not None:
-                    vis.set_data(pos=pos, color=vertex_colors[idx])
-                else:
-                    vis.set_data(pos=pos, color=options.get("color", "red"))
+                visuals = self._create_lines(streamlines, options)
+
+            self._tractograms[name] = visuals
+
+        vertex_colors = self._get_vertex_colors(vertex_data, options)
+        visuals = self._tractograms[name]
+        if options.get("style", "line") == "tube":
+            self._update_tubes(visuals, vertex_colors, options)
+        else:
+            self._update_lines(visuals, vertex_colors, options)
 
     def remove_tractogram(self, name):
         if name in self._tractograms:
@@ -273,6 +305,7 @@ class View(scene.SceneCanvas):
             self.remove_tractogram(t)
 
     def to_png(self, fname, size=None):
+        # Not working yet
         from vispy.gloo.util import _screenshot
         from vispy import gloo
         #img = _screenshot()
@@ -320,7 +353,7 @@ class VolumeSelection(QWidget):
                 import traceback
                 traceback.print_exc()
 
-class TractView(QWidget):
+class TractViewSelection(QWidget):
 
     sig_changed = QtCore.Signal(object)
 
@@ -427,14 +460,13 @@ class TractView(QWidget):
     @property
     def vertex_data(self):
         color_by = self._options.get("color_by", None)
-        print("vertex data: ", self.name, color_by)
         return None if color_by is None else self.tractogram.data_per_point[color_by]
 
     @property
     def options(self):
         return self._options
 
-class TractSelection(QWidget):
+class TractInputSelection(QWidget):
 
     def __init__(self, viewer):
         QWidget.__init__(self)
@@ -459,7 +491,7 @@ class TractSelection(QWidget):
         self._tract_combo.currentIndexChanged.connect(self._tract_changed)
         hbox.addWidget(self._tract_combo, stretch=0)
 
-        self._tract_view = TractView()
+        self._tract_view = TractViewSelection()
         self._tract_view.sig_changed.connect(self._tract_view_changed)
         hbox.addWidget(self._tract_view, stretch=2)
         self._vbox.addLayout(hbox)
@@ -515,7 +547,7 @@ class DataSelection(QtWidgets.QWidget):
 
         vbox = QVBoxLayout()
         vbox.addWidget(VolumeSelection(viewer))
-        vbox.addWidget(TractSelection(viewer))
+        vbox.addWidget(TractInputSelection(viewer))
         self.setLayout(vbox)
 
 class LightControl(QWidget):
