@@ -17,6 +17,9 @@ from vispy.util import transforms
 from vispy.color import Color, colormap
 from vispy.visuals.filters import Alpha
 
+from .connected_tube import ConnectedTubeVisual
+Tube = scene.visuals.create_visual_node(ConnectedTubeVisual)
+
 LOCAL_FILE_PATH = ""
 
 class View(scene.SceneCanvas):
@@ -224,38 +227,38 @@ class View(scene.SceneCanvas):
                 except AttributeError:
                     continue
     
-    def _create_tubes(self, streamlines, options):
-        visuals = []
-        for idx, sldata in enumerate(streamlines):
-            print(f"Vis: {idx+1}/{len(streamlines)}")
-            vis = scene.visuals.Tube(sldata, radius=options.get("width", 1), shading='smooth')
-            vis.shading_filter.light_dir = self._current_light_dir
-            vis.shading_filter.ambient_light = self._ambient
-            vis.shading_filter.specular_light = self._specular
-            vis.shading_filter.diffuse_light = self._diffuse
-            vis.shading_filter.shininess = self._shininess
-            vis.parent = self._scene
-            visuals.append(vis)
-        return visuals
-     
-    def _create_lines(self, streamlines, options):
+    def _get_connections(self, streamlines):
         connections = []
-        for idx, sldata in enumerate(streamlines):
+        for sldata in streamlines:
             connect = np.ones(sldata.shape[0], dtype=bool)
             connect[-1] = False
             connections.append(connect)
-        connections = np.concatenate(connections)
-        coords = np.concatenate(streamlines, axis=0)
+        return np.concatenate(streamlines, axis=0), np.concatenate(connections)
+
+    def _create_tubes(self, streamlines, options):
+        streamlines = streamlines[::options.get("subset", 1)]
+        coords, connections = self._get_connections(streamlines)
+        vis = Tube(coords, connect=connections, parent=self._scene, radius=options.get("width", 1), shading='smooth')
+        vis.shading_filter.light_dir = self._current_light_dir
+        vis.shading_filter.ambient_light = self._ambient
+        vis.shading_filter.specular_light = self._specular
+        vis.shading_filter.diffuse_light = self._diffuse
+        vis.shading_filter.shininess = self._shininess
+        return [vis]
+
+    def _create_lines(self, streamlines, options):
+        coords, connections = self._get_connections(streamlines)
         vis = scene.visuals.Line(coords, connect=connections, parent=self._scene, method="gl", antialias=True) #  FIXME width
         return [vis]
 
     def _update_tubes(self, visuals, vertex_colors, options):
-        for idx, vis in enumerate(visuals):
-            md = vis.mesh_data
-            if vertex_colors is not None:
-                vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), vertex_colors=np.repeat(vertex_colors[idx], 8, axis=0))
-            else:
-                vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), color=options.get("color", "red"))
+        vis = visuals[0]
+        md = vis.mesh_data
+        if vertex_colors is not None:
+            vertex_colors = np.concatenate(vertex_colors, axis=0)
+            vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), vertex_colors=np.repeat(vertex_colors, 8, axis=0))
+        else:
+            vis.set_data(vertices=md.get_vertices(), faces=md.get_faces(), color=options.get("color", "red"))
 
     def _update_lines(self, visuals, vertex_colors, options):
         vis = visuals[0]
@@ -268,7 +271,7 @@ class View(scene.SceneCanvas):
 
     def _get_vertex_colors(self, vertex_data, options):
         if vertex_data is not None:
-            vertex_data = vertex_data[::options.get("subset", 20)]
+            vertex_data = vertex_data[::options.get("subset", 1)]
             cmap = colormap.get_colormap(options.get("cmap", "viridis"))
             vertex_data_norm = [(d - np.min(d)) / (np.max(d) - np.min(d)) for d in vertex_data]
             return [cmap.map(d) for d in vertex_data_norm]
@@ -279,7 +282,6 @@ class View(scene.SceneCanvas):
         """
         if name not in self._tractograms or any([v in updated for v in ("style", "width", "subset")]):
             self.remove_tractogram(name)
-            streamlines = streamlines[::options.get("subset", 20)]
             if options.get("style", "line") == "tube":
                 visuals = self._create_tubes(streamlines, options)
             else:
@@ -420,8 +422,6 @@ class TractViewSelection(QWidget):
         color_by = None if color_by_idx == 0 else self._color_by_combo.itemText(color_by_idx)
         self._options = {
             "style" : self._style_combo.itemText(self._style_combo.currentIndex()),
-            "width" : float(self._width_edit.text()),
-            "subset" : int(self._subset_edit.text()),
         }
         if color_by is not None:
             self._options["color_by"] = color_by
@@ -429,6 +429,12 @@ class TractViewSelection(QWidget):
         else:
             self._options["color"] = self._color_combo.itemText(self._color_combo.currentIndex())
 
+        if style == "tube":
+            self._options["subset"] = int(self._subset_edit.text())
+            self._options["width"] = float(self._width_edit.text())
+
+        self._subset_edit.setEnabled(style == "tube")
+        self._width_edit.setEnabled(style == "tube")
         self._color_combo.setEnabled(enabled and color_by is None)
         self._cmap_combo.setEnabled(enabled and color_by is not None)
         self._color_by_combo.setEnabled(enabled)
@@ -441,7 +447,7 @@ class TractViewSelection(QWidget):
             self.tractogram = tractogram
             self._style_combo.setCurrentIndex(self._style_combo.findText(options.get("style", "none")))
             self._width_edit.setText(str(options.get("width", 1)))
-            self._subset_edit.setText(str(options.get("subset", int(round(float(len(tractogram.streamlines)) / 500) * 10))))
+            self._subset_edit.setText(str(options.get("subset", int(round(float(len(tractogram.streamlines)) / 100) * 10))))
             self._color_combo.setCurrentIndex(self._color_combo.findText(options.get("color", "red")))
             self._color_by_combo.clear()
             self._color_by_combo.addItem("None")
