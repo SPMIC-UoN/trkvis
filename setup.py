@@ -6,6 +6,7 @@ import os
 import subprocess
 import re
 import io
+import glob
 
 from setuptools import setup
 from setuptools import find_packages
@@ -77,6 +78,14 @@ def get_version(rootdir):
 
     return version
 
+def get_package_data():
+    """
+    Get extra data files to install into the package, e.g. icons
+    """
+    return {
+        'trkvis/icons' : glob.glob('trkvis/icons/*.png')
+    }
+
 module_dir = os.path.abspath(os.path.dirname(__file__))
 
 kwargs = {
@@ -91,8 +100,8 @@ kwargs = {
     'license' : 'Apache-2.0',
     'install_requires' : get_requirements(module_dir),
     'packages' : find_packages(),
-    'package_data' : {
-    },
+    'package_data' : get_package_data(),
+    'include_package_data' : True,
     'entry_points' : {
         'console_scripts' : [
             "trkvis=trkvis.trkvis:main",
