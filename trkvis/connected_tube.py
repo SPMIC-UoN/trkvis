@@ -16,6 +16,9 @@ class ConnectedTubeVisual(MeshVisual):
     torsion such that it varies smoothly along the curve, including if
     the tube is closed.
 
+    MSC: Optimized constructor with Numpy bulk operations and add 'connect'
+    parameter as per LineVisual
+
     Parameters
     ----------
     points : ndarray
@@ -59,7 +62,17 @@ class ConnectedTubeVisual(MeshVisual):
                  connect=None):
 
         # make sure we are working with floats
-        points = np.array(points).astype(float)
+        points = np.array(points).astype(float) # [NPOINTS, 3]
+
+        if connect is None:
+            connect = np.ones(len(points), dtype=bool)
+        else:
+            connect = np.array(connect, dtype=bool)
+        if len(connect) != len(points):
+            raise ValueError("Connection array must be the same length as points")
+        if not closed:
+            connect[-1] = False
+        tube_ends = np.where(np.logical_not(connect))[0]
 
         tangents, normals, binormals = _frenet_frames(points, closed)
 
@@ -70,41 +83,45 @@ class ConnectedTubeVisual(MeshVisual):
             radius = [radius] * len(points)
         elif len(radius) != len(points):
             raise ValueError('Length of radii list must match points.')
+        radius = np.array(radius, dtype=np.float32)
 
         # get the positions of each vertex
-        grid = np.zeros((len(points), tube_points, 3))
-        for i in range(len(points)):
-            pos = points[i]
-            normal = normals[i]
-            binormal = binormals[i]
-            r = radius[i]
-
-            # Add a vertex for each point on the circle
-            v = np.arange(tube_points,
-                          dtype=np.float32) / tube_points * 2 * np.pi
-            cx = -1. * r * np.cos(v)
-            cy = r * np.sin(v)
-            grid[i] = (pos + cx[:, np.newaxis]*normal +
-                       cy[:, np.newaxis]*binormal)
+        #print("creating positions")
+        #import time
+        #print(time.perf_counter())
+        vertices = np.arange(tube_points, dtype=np.float32) / tube_points * 2 * np.pi # [TUBE_POINTS]
+        cxs = -1. * radius[..., np.newaxis] * np.cos(vertices) # [NPOINTS, TUBE_POINTS]
+        cys = radius[..., np.newaxis] * np.sin(vertices) # [NPOINTS, TUBE_POINTS]
+        grid = points[:, np.newaxis, :] + cxs[..., np.newaxis] * normals[:, np.newaxis, :] + cys[..., np.newaxis] * binormals[:, np.newaxis, :] # [NPOINTS, TUBE_POINTS, 3]
+        vertices = grid.reshape(grid.shape[0]*grid.shape[1], 3)
+        #print(time.perf_counter())
+        #print("DONE creating positions")
 
         # construct the mesh
-        indices = []
-        for i in range(segments):
-            if connect is None or not connect[i]:
-                continue
-            for j in range(tube_points):
-                ip = (i+1) % segments if closed else i+1
-                jp = (j+1) % tube_points
+        #print("creating mesh")
+        #print(time.perf_counter())
+        indices2 = np.zeros((segments*tube_points*2, 3), dtype=np.uint32)
+        indices2[0::2, 0] = np.arange(segments*tube_points, dtype=np.uint32)
+        indices2[1::2, 0] = np.arange(segments*tube_points, dtype=np.uint32) + tube_points
+        indices2[0::2, 1] = np.arange(segments*tube_points, dtype=np.uint32) + tube_points
+        indices2[1::2, 1] = np.arange(segments*tube_points, dtype=np.uint32) + tube_points + 1
+        indices2[0::2, 2] = np.arange(segments*tube_points, dtype=np.uint32) + 1
+        indices2[1::2, 2] = np.arange(segments*tube_points, dtype=np.uint32) + 1
+        indices2[tube_points*2-2::2*tube_points, 2] -= tube_points 
+        indices2[tube_points*2-1::2*tube_points, 2] -= tube_points
+        indices2[tube_points*2-1::2*tube_points, 1] -= tube_points
 
-                index_a = i*tube_points + j
-                index_b = ip*tube_points + j
-                index_c = ip*tube_points + jp
-                index_d = i*tube_points + jp
+        tube_start1, tube_start2 = 0, 0
+        indices = np.zeros((len(indices2) - (len(tube_ends)-1)*2*tube_points, 3), dtype=np.uint32)
+        for idx in range(len(tube_ends)):
+            tube_end2 = tube_ends[idx]
+            tube_end1 = tube_end2 - idx
+            indices[tube_start1*tube_points*2:tube_end1*tube_points*2, :] = indices2[tube_start2*tube_points*2:tube_end2*tube_points*2, :]
+            tube_start1 = tube_end1
+            tube_start2 = tube_end2 + 1
 
-                indices.append([index_a, index_b, index_d])
-                indices.append([index_b, index_c, index_d])
-
-        vertices = grid.reshape(grid.shape[0]*grid.shape[1], 3)
+        #print(time.perf_counter())
+        #print("DONE creating mesh")
 
         color = ColorArray(color)
         if vertex_colors is None:
@@ -112,14 +129,44 @@ class ConnectedTubeVisual(MeshVisual):
                                      (len(points), 4))
             vertex_colors = np.repeat(point_colors, tube_points, axis=0)
 
-        indices = np.array(indices, dtype=np.uint32)
-
         MeshVisual.__init__(self, vertices, indices,
                             vertex_colors=vertex_colors,
                             face_colors=face_colors,
                             shading=shading,
                             mode=mode)
 
+def _batch_rotate(angle, axis, dtype=None):
+    """3x3 rotation matrices for rotation about a batch of angles/vectors.
+
+    Parameters
+    ----------
+    angle : ndarray [NBATCH]
+        The angles of rotation, in radians.
+    axis : ndarray [NBATCH, 3]
+        The x, y, z coordinates of the axis direction UNIT vector.
+
+    Returns
+    -------
+    M : ndarray [NBATCH, 3, 3]
+        Transformation matrix describing the rotation.
+    """
+    nbatch = angle.shape[0]
+    assert angle.shape[0] == axis.shape[0]
+    assert axis.shape[1] == 3
+    x, y, z = axis[:, 0], axis[:, 1], axis[:, 2] # [NBATCH]
+    c, s = np.cos(angle), np.sin(angle) # [NBATCH]
+    cx, cy, cz = (1 - c) * x, (1 - c) * y, (1 - c) * z
+    rots = np.zeros((nbatch, 3, 3), dtype=np.float32)
+    rots[:, 0, 0] = cx * x + c
+    rots[:, 1, 0] = cy * x - z * s
+    rots[:, 2, 0] = cz * x + y * s
+    rots[:, 0, 1] = cx * y + z * s
+    rots[:, 1, 1] = cy * y + c
+    rots[:, 2, 1] = cz * y - x * s
+    rots[:, 0, 2] = cx * z - y * s
+    rots[:, 1, 2] = cy * z + x * s
+    rots[:, 2, 2] = cz * z + c
+    return rots
 
 def _frenet_frames(points, closed):
     """Calculates and returns the tangents, normals and binormals for
@@ -127,6 +174,7 @@ def _frenet_frames(points, closed):
     """
     tangents = np.zeros((len(points), 3))
     normals = np.zeros((len(points), 3))
+    normals2 = np.zeros((len(points), 3))
 
     epsilon = 0.0001
 
@@ -146,19 +194,24 @@ def _frenet_frames(points, closed):
     normal[smallest] = 1.
 
     vec = np.cross(tangents[0], normal)
-
     normals[0] = np.cross(tangents[0], vec)
 
     # Compute normal and binormal vectors along the path
+    #print("compute normal binormal")
+    #import time
+    #print(time.perf_counter())
+    vecs = np.cross(np.roll(tangents, 1, axis=0), tangents)
+    thetas_rad = -np.arccos(np.clip(np.einsum('ij,ij->i', np.roll(tangents, 1, axis=0), tangents), -1, 1))
+    vec_norms = norm(vecs, axis=-1)
+    vecs = vecs / vec_norms[..., np.newaxis]
+    rots = _batch_rotate(thetas_rad, vecs)
+   
     for i in range(1, len(points)):
-        normals[i] = normals[i-1]
-
-        vec = np.cross(tangents[i-1], tangents[i])
-        if norm(vec) > epsilon:
-            vec /= norm(vec)
-            theta = np.arccos(np.clip(tangents[i-1].dot(tangents[i]), -1, 1))
-            normals[i] = rotate(-np.degrees(theta),
-                                vec)[:3, :3].dot(normals[i])
+        if vec_norms[i] > epsilon:
+            normals[i] = rots[i].dot(normals[i-1])
+        else:
+            normals[i] = normals[i-1]
+    #print(time.perf_counter())
 
     if closed:
         theta = np.arccos(np.clip(normals[0].dot(normals[-1]), -1, 1))
