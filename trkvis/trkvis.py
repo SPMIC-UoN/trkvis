@@ -987,13 +987,13 @@ class TrackVis(QWidget):
         btn.clicked.connect(self._flip)
         hbox.addWidget(btn)
 
-        btn = QtWidgets.QPushButton("Save")
-        btn.setIcon(get_icon("3d"))
-        btn.setFixedSize(32, 32)
-        btn.setIconSize(QtCore.QSize(30, 30))
-        btn.setToolTip("Save")
-        btn.clicked.connect(self._save)
-        hbox.addWidget(btn)
+        #btn = QtWidgets.QPushButton("Save")
+        #btn.setIcon(get_icon("3d"))
+        #btn.setFixedSize(32, 32)
+        #btn.setIconSize(QtCore.QSize(30, 30))
+        #btn.setToolTip("Save")
+        #btn.clicked.connect(self._save)
+        #hbox.addWidget(btn)
 
         hbox.addStretch(1)
 
